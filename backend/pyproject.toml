@@ -1,0 +1,32 @@
+[project]
+name = "backend"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.20.0",
+    "docling>=2.130.0",
+    "fastapi>=0.141.1",
+    "httpx>=0.28.1",
+    "langchain>=1.4.2",
+    "langchain-community>=0.4.2",
+    "langchain-core>=1.6.5",
+    "langgraph>=1.2.12",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.6",
+    "psycopg[binary]>=3.3.6",
+    "pydantic-settings>=2.15.0",
+    "python-multipart>=0.0.32",
+    "qdrant-client>=1.19.1",
+    "redis>=8.1.0",
+    "sentence-transformers>=6.1.0",
+    "sqlalchemy>=2.1.1",
+    "tenacity>=9.1.4",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

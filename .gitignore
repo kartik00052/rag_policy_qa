@@ -1,0 +1,28 @@
+﻿# Python
+backend/.venv/
+__pycache__/
+*.py[cod]
+
+# Environment variables
+.env
+.env.*
+
+# Keep example environment files
+!.env.example
+
+# Testing/cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
