@@ -273,6 +273,86 @@ def judge(report: Report, row: dict[str, Any], expect: list[str], max_overlap: f
     )
 
 
+#: How long to wait for the server to become usable before giving up.
+#:
+#: Matches the default in start_server.ps1. The point of waiting rather than
+#: failing is that this suite is routinely launched against a stack that is still
+#: coming up, and a connection refused on the first question is a statement
+#: about the stack, not about generation.
+PREFLIGHT_TIMEOUT_SECONDS = 180.0
+
+#: Exit code for "the stack never came up", kept distinct from 1 ("a generation
+#: check failed") so a caller can tell an infrastructure problem from a real
+#: regression without parsing stdout.
+EXIT_PREFLIGHT_FAILED = 2
+
+
+async def await_server(client: httpx.AsyncClient) -> int | None:
+    """Block until the server is serving *and* its dependencies are healthy.
+
+    Returns ``None`` once the stack is ready, or the exit code to stop with.
+
+    ``/health`` answering 200 is not sufficient. The server binds its port during
+    startup and only finishes checking its dependencies afterwards, so it will
+    happily return a body that lists Ollama or Postgres as down - and this suite
+    would then record ten connection errors and report a generation failure that
+    never happened. Both the top-level status and every dependency are required
+    to be green, so a half-started stack is waited out rather than measured.
+    """
+    started = time.monotonic()
+    deadline = started + PREFLIGHT_TIMEOUT_SECONDS
+    last_problem = "no response yet - server has not bound the port"
+    next_progress_at = 15.0
+
+    while True:
+        try:
+            response = await client.get(f"{BASE}/health", timeout=10.0)
+            if response.status_code == 200:
+                health = response.json()
+                unhealthy = [
+                    dep.get("name")
+                    for dep in (health.get("dependencies") or [])
+                    if not dep.get("ok")
+                ]
+                if health.get("status") == "ok" and not unhealthy:
+                    print(
+                        f"preflight: server ready after "
+                        f"{time.monotonic() - started:.1f}s "
+                        f"(status=ok, {len(health.get('dependencies') or [])} "
+                        f"dependencies green)"
+                    )
+                    return None
+                last_problem = (
+                    f"status={health.get('status')}"
+                    + (f", unhealthy: {', '.join(unhealthy)}" if unhealthy else "")
+                )
+            else:
+                last_problem = f"HTTP {response.status_code} from /health"
+        except Exception as exc:  # noqa: BLE001 - any failure is just "not ready"
+            last_problem = f"{type(exc).__name__}: {exc}"
+
+        if time.monotonic() >= deadline:
+            print(
+                f"preflight FAILED: server not ready after "
+                f"{PREFLIGHT_TIMEOUT_SECONDS:.0f}s - {last_problem}",
+                file=sys.stderr,
+            )
+            print(
+                "Start the stack with backend/scripts/start_server.ps1 (Docker "
+                "Desktop, the compose services and Ollama must all be up) before "
+                "running this suite; no generation check was performed.",
+                file=sys.stderr,
+            )
+            return EXIT_PREFLIGHT_FAILED
+
+        elapsed = time.monotonic() - started
+        if elapsed >= next_progress_at:
+            left = int(deadline - time.monotonic())
+            print(f"preflight: {elapsed:.0f}s elapsed, ~{left}s left ({last_problem})")
+            next_progress_at = elapsed + 15.0
+        await asyncio.sleep(2.0)
+
+
 class _Tee:
     """Write to two streams, so a long run is durable even if it is detached.
 
@@ -328,6 +408,10 @@ async def main() -> int:
     print("=" * 78)
 
     async with httpx.AsyncClient() as client:
+        preflight = await await_server(client)
+        if preflight is not None:
+            return preflight
+
         for run_number in range(1, args.runs + 1):
             print(f"\n########## RUN {run_number}/{args.runs} ##########")
             for query, expect in questions:
