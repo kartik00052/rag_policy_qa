@@ -49,6 +49,22 @@ class RAGState(TypedDict, total=False):
     #: The model's output before citation markers were stripped. Kept because
     #: markers are what citations are resolved from.
     raw_answer: str
+    #: Provider calls actually made for this query: 1 when the first attempt was
+    #: accepted, 2 when it was rejected and retried. The SSE contract reports
+    #: only the final answer, so without this the retry rate - which directly
+    #: multiplies generation cost - is unmeasurable. Read by
+    #: ``/api/v1/_debug/ask``; never persisted.
+    attempts: int
+    #: The provider's own per-attempt timing breakdown, one entry per call in
+    #: ``attempts``. See :class:`app.services.llm.ProviderStats`. Operational and
+    #: not persisted, for the same reason.
+    generation_stats: list[Any]
+    #: Which exit path the generation node took ("answered",
+    #: "answered-after-retry", "declined", "rejected-after-retry", ...).
+    outcome: str
+    #: The model that served the request, recorded per request rather than read
+    #: from settings so a benchmark that swaps models mid-run stays attributable.
+    model: str
     #: Anything that must be reported rather than raised: see the error contract
     #: in app/rag/graph.py.
     error: Any

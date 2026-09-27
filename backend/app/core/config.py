@@ -85,8 +85,19 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = Field(min_length=1)
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
-    llm_num_ctx: int = Field(default=4096, ge=512)
+    llm_num_ctx: int = Field(default=2048, ge=512)
     llm_timeout_seconds: float = Field(default=180.0, gt=0.0)
+
+    #: How long the provider holds the model resident after a request.
+    #: Ollama's own default is 5 minutes; a dev session pauses longer than that
+    #: between questions, and the reload costs ~2-3s plus a slow first prefill.
+    llm_keep_alive: str = "30m"
+
+    #: Hard ceiling on generated tokens. Ollama's default is unbounded, which
+    #: means a rambling or looping generation runs until the context window is
+    #: full before judge_answer can reject it. Measured answers are 16-47
+    #: tokens, so this only bounds the pathological case.
+    llm_num_predict: int = Field(default=300, ge=16, le=4096)
 
     # --- Reranking + evidence gate (Stage 4) ------------------------------------
     # Stage 3 returns RRF-fused candidates. The cross-encoder reads each

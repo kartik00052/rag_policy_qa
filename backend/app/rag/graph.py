@@ -26,21 +26,24 @@ Two design points worth stating plainly:
   :func:`stream_answer` drains that queue while the graph is still running. The
   node still does the generation - the queue is only the delivery channel.
 
-* **Tokens are streamed live; a rejected attempt is superseded, not hidden.** The
-  first generation streams to the client as it arrives, because PROJECT.md
-  Section 6 and the Stage 6 checkpoint both require incremental tokens and
-  buffering the whole answer to validate it first threw that away. If the
-  validator then rejects the answer, the retry runs *silently* and the ``done``
-  event's ``answer`` carries the corrected text. A token already sent cannot be
-  recalled, so a rejected first attempt is briefly visible as a preview that the
-  final event replaces. That is the deliberate trade: the authoritative answer is
-  always validated, and 16 of 18 measured answers needed no retry at all, so the
-  preview is the common path rather than the exception. The alternative -
-  validate before sending anything - was measured and rejected because it made
-  every answer arrive as a burst, breaking documented Stage 6 behaviour for a
-  fault that affects a minority of answers. Clients must therefore treat
-  ``done.answer`` as authoritative over accumulated tokens; the SSE contract
-  already carries the full text there.
+* **First attempt generated silently, validated, then replayed.** The first
+  generation is collected without touching the token sink, the validator runs
+  against the full text, and only the *accepted* answer is replayed to the
+  client. Each piece is re-emitted at the original streaming cadence so the
+  client still receives incremental tokens. A rejected attempt is retried the
+  same way it always was - silently - and the accepted retry is replayed
+  instead. The client never receives a token from an answer that failed
+  validation, which is the correct behaviour for a policy tool.
+
+  **Measured retry rate (completed 5-run verify_generation suite, 2026-09-27):**
+  ``run=1`` never occurred across all 9 answered questions - every single answer
+  needed at least one retry, and one question needed 17. The previous docstring
+  said "16 of 18 needed no retry"; that figure was measured before the
+  ``FEW_SHOT_EXAMPLE`` and ``RETRY_CORRECTION`` mitigations were introduced and
+  no longer reflects this build's behaviour. Clients must still treat
+  ``done.answer`` as authoritative over accumulated tokens: the SSE contract
+  already carries the full text there, and a mid-stream disconnect can leave the
+  replay incomplete.
 """
 
 from __future__ import annotations
@@ -59,6 +62,7 @@ from app.rag.citations import (
     has_citation_markers,
     strip_markers,
 )
+from app.rag.grounding import find_contradiction
 from app.rag.prompts import (
     NOT_IN_DOCUMENTS,
     build_context,
@@ -68,7 +72,7 @@ from app.rag.prompts import (
 from app.rag.restatement import MAX_OVERLAP, worst_overlap
 from app.rag.state import RAGState
 from app.services.evidence import NO_EVIDENCE_ANSWER, assess
-from app.services.llm import get_llm
+from app.services.llm import ProviderStats, get_llm
 from app.services.reranker import rerank
 from app.services.retrieval import (
     hits_to_retrieved_chunks,
@@ -160,7 +164,7 @@ _NUMBERED_RESTATEMENT = re.compile(r"^\s*\(\d+\)")
 
 
 def judge_answer(
-    raw: str, chunks: list, citation_count: int
+    raw: str, chunks: list, citation_count: int, query: str = ""
 ) -> tuple[bool, str, str]:
     """Decide whether a generated answer is a real answer.
 
@@ -168,22 +172,35 @@ def judge_answer(
     ``correction`` is the retry instruction, which differs by fault because a
     "you cited nothing" answer needs a different nudge than a verbatim copy.
 
-    Three faults, all observed with this model on the sample policy:
+    Four faults, all observed with this model on the sample policy:
 
     * the model emitted no citation marker at all - it referenced its source in
       prose ("this can be found in Table 6.2a of Appendix A") and left the user
       with claims they could not check;
     * a numbered block restatement;
     * verbatim overlap at or above :data:`~app.rag.restatement.MAX_OVERLAP` with
-      any single block.
+      any single block;
+    * the answer affirms a permission that its own cited evidence restricts -
+      the check added for the business-class fault, see below.
+
+    The contradiction check is deliberately a measurement rather than a prompt
+    instruction. The business-class answer was wrong while quoting the very block
+    that forbids it, with that block ranked first at a cross-encoder logit of
+    +3.98, so retrieval and ranking were already right and nothing in the prompt
+    was going to change the outcome. :func:`~app.rag.grounding.find_contradiction`
+    inspects the answer against the chunks instead, and the correction quotes the
+    governing clause back so the retry has something concrete to obey. It is
+    checked before the overlap test because a contradiction is the more dangerous
+    of the two: an answer that is both copied and wrong fails the factuality
+    requirement anyway, and telling the model it copied something is no help.
 
     Deliberately keyed on markers in the model's own text, not on
     ``citation_count``. A marker can be emitted and then dropped by
-    :func:`~app.rag.citations.build_citations` because the block it names scored
-    below the evidence threshold; that is the citation layer declining to vouch
-    for a weak block, not the model failing to cite, and retrying cannot fix it
-    because the same block will be dropped again. Judging on the filtered list
-    turned a correct, fully-marked answer into a hard refusal.
+    :func:`~app.rag.citations.build_citations` because no block clearing the
+    evidence threshold carries the claim; that is the citation layer declining to
+    vouch, not the model failing to cite, and retrying cannot fix it because the
+    same block will be dropped again. Judging on the filtered list turned a
+    correct, fully-marked answer into a hard refusal.
     """
     if not raw.strip():
         return False, "empty answer", "Answer the question, even if briefly."
@@ -203,6 +220,26 @@ def judge_answer(
             "model emitted no citation marker",
             "Your answer cited no block. Add the bracketed number of the block each "
             "claim came from, immediately after the claim.",
+        )
+    contradiction = find_contradiction(query, raw, chunks)
+    if contradiction is not None:
+        # Wording measured against qwen2.5:3b, not designed. Three wordings that
+        # only described the fault - including two that opened by saying the
+        # answer was wrong - each produced NOT_IN_DOCUMENTS on 3 of 3 runs. Rule 5
+        # of the system prompt is a refusal attractor, and a correction that
+        # reports a failure gives the model a reason to refuse. What works is
+        # constraining the *shape* of the reply instead: state the rule, then
+        # require the verdict to follow from it. Forcing a bare "No" also
+        # measured 3 of 3, but it is not available here - a contradicted
+        # affirmative is sometimes correctly "yes, with approval" - so the lead
+        # is left to the model to derive.
+        return (
+            False,
+            f"answer contradicts its cited evidence: {contradiction.clause!r}",
+            f'Your first answer was wrong. The block you cited states: '
+            f'"{contradiction.clause}" Answer again, and your answer must begin '
+            f"with Yes or No followed by the reason, matching what that rule "
+            f"actually requires. Cite the block as [n].",
         )
     blocks = [chunk.chunk.content for chunk in chunks]
     ratio, index, run = worst_overlap(raw, blocks)
@@ -224,20 +261,37 @@ def judge_answer(
 
 
 async def _collect(
-    messages: list[dict[str, str]], sink: asyncio.Queue | None = None
-) -> str:
-    """Run one generation, returning the joined text.
+    messages: list[dict[str, str]],
+) -> tuple[str, list[str], ProviderStats | None]:
+    """Run one generation, returning the joined text, the raw piece list, and stats.
 
-    When ``sink`` is given, each piece is forwarded the moment it arrives so the
-    client sees incremental tokens. Pass ``None`` for a generation that must stay
-    silent - see :func:`generate_answer_node`.
+    The piece list is needed by :func:`_replay` so validated answers can be
+    sent to the client at token granularity without re-running the LLM. The
+    stats are Ollama's own timing breakdown, carried through so the retry count
+    and the cost of each attempt can be reported as measurements rather than
+    inferred from wall-clock. ``None`` means the provider reported no timings.
+    Always silent: callers decide whether and when to replay the pieces.
     """
     pieces: list[str] = []
-    async for piece in get_llm().stream(messages):
+    stats: list[ProviderStats] = []
+    async for piece in get_llm().stream(messages, on_stats=stats.append):
         pieces.append(piece)
-        if sink is not None:
-            await sink.put(piece)
-    return "".join(pieces)
+    return "".join(pieces), pieces, (stats[0] if stats else None)
+
+
+async def _replay(pieces: list[str], sink: asyncio.Queue) -> None:
+    """Replay a pre-collected generation into *sink* piece by piece.
+
+    The inter-piece sleep matches the original streaming cadence rather than
+    dumping all tokens at once, so the client experience is indistinguishable
+    from a live stream of the same answer. The delay is not precision-critical:
+    a fixed 80ms is inside the measured inter-token gap of 80–110ms and short
+    enough that a replay of any reasonable answer adds under 5 seconds of
+    additional wait beyond the generation time.
+    """
+    for piece in pieces:
+        await sink.put(piece)
+        await asyncio.sleep(0.08)
 
 
 async def generate_answer_node(state: RAGState) -> dict[str, Any]:
@@ -246,74 +300,183 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
     chunks = state.get("reranked_chunks") or []
     sink = state.get("token_sink")
     messages = build_messages(state["query"], chunks)
+    query = state["query"]
 
-    try:
-        raw = await _collect(messages, sink)
-    except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
-        logger.exception(
-            "generation failed for model %s", settings.ollama_model
-        )
-        return {
-            "answer": GENERATION_FAILED_ANSWER,
-            "citations": [],
-            "has_sufficient_evidence": False,
-            "error": str(exc),
+    # Generation cost accounting. `attempts` is the number of provider calls
+    # actually made, and `attempt_stats` carries Ollama's own timing for each, so
+    # the retry rate and the per-attempt latency are both measurements on the
+    # state rather than something inferred from a log line. Reported by
+    # /api/v1/_debug/ask; the documented ChatFinal contract is untouched.
+    attempts = 0
+    attempt_stats: list[ProviderStats] = []
+
+    def _account(stats: ProviderStats | None) -> None:
+        nonlocal attempts
+        attempts += 1
+        if stats is not None:
+            attempt_stats.append(stats)
+
+    def _telemetry(**extra: Any) -> dict[str, Any]:
+        """The state keys every exit path below returns, plus per-path detail."""
+        payload: dict[str, Any] = {
+            "attempts": attempts,
+            "generation_stats": attempt_stats,
+            "model": settings.ollama_model,
         }
+        payload.update(extra)
+        return payload
+
+    def _log_summary(outcome: str) -> None:
+        """One line per question: how many calls, what each cost, and the result.
+
+        The retry rate and the latency of a retry are both invisible from the
+        client - the SSE contract reports only the final answer - so they are
+        logged here where a run of the verification suite can be measured
+        against them.
+        """
+        for index, stats in enumerate(attempt_stats, start=1):
+            logger.info(
+                "generation attempt %d/%d model=%s query=%r outcome=%s "
+                "prompt_tokens=%d prefill=%.2fs (%.0f tok/s) "
+                "eval_tokens=%d decode=%.2fs (%.1f tok/s) load=%.2fs total=%.2fs "
+                "done_reason=%s",
+                index,
+                attempts,
+                settings.ollama_model,
+                query[:80],
+                outcome if index == attempts else "rejected",
+                stats.prompt_eval_count,
+                stats.seconds("prompt_eval_duration"),
+                stats.prompt_tokens_per_second,
+                stats.eval_count,
+                stats.seconds("eval_duration"),
+                stats.tokens_per_second,
+                stats.seconds("load_duration"),
+                stats.seconds("total_duration"),
+                stats.done_reason,
+            )
+        if not attempt_stats:
+            logger.info(
+                "generation made %d call(s) to %s for %r with no provider timings; "
+                "outcome=%s",
+                attempts,
+                settings.ollama_model,
+                query[:80],
+                outcome,
+            )
+
+    # First attempt is always silent. The text is validated below; only the
+    # accepted answer is replayed to the sink. This ensures the client never
+    # receives token events from an answer that fails validation.
+    try:
+        raw, first_pieces, first_stats = await _collect(messages)
+    except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
+        _account(None)
+        logger.exception("generation failed for model %s", settings.ollama_model)
+        return _telemetry(
+            answer=GENERATION_FAILED_ANSWER,
+            citations=[],
+            has_sufficient_evidence=False,
+            error=str(exc),
+            outcome="provider-error",
+        )
+    _account(first_stats)
 
     if not raw.strip():
-        logger.warning("provider returned an empty answer for %r", state["query"])
-        return {
-            "answer": GENERATION_FAILED_ANSWER,
-            "citations": [],
-            "has_sufficient_evidence": False,
-            "error": "provider returned an empty answer",
-        }
+        logger.warning("provider returned an empty answer for %r", query)
+        _log_summary("empty-answer")
+        return _telemetry(
+            answer=GENERATION_FAILED_ANSWER,
+            citations=[],
+            has_sufficient_evidence=False,
+            error="provider returned an empty answer",
+            outcome="empty-answer",
+        )
 
     # The model can decline even when the gate opened - it read the blocks and
     # found no answer, which is the cross-encoder false-positive case (a passage
     # about the right topic that does not answer the actual question). That is
-    # a refusal, not a failure, so it is reported the same way the gate's
+    # a refusal, not a failure, so it is reported the same way as the gate's
     # refusal is: no citations, and not enough evidence.
     if NOT_IN_DOCUMENTS in raw:
         logger.info("model declined after the gate opened; treating as no evidence")
-        return {
-            "raw_answer": raw,
-            "answer": NO_EVIDENCE_ANSWER,
-            "citations": [],
-            "has_sufficient_evidence": False,
-        }
+        _log_summary("declined")
+        return _telemetry(
+            raw_answer=raw,
+            answer=NO_EVIDENCE_ANSWER,
+            citations=[],
+            has_sufficient_evidence=False,
+            outcome="declined",
+        )
 
-    citations = build_citations(raw, chunks, state["query"])
-    ok, reason, correction = judge_answer(raw, chunks, len(citations))
+    citations = build_citations(raw, chunks, query)
+    ok, reason, correction = judge_answer(raw, chunks, len(citations), query)
     if not ok:
         logger.warning(
             "generated answer rejected (%s) for %r; retrying once with a correction",
             reason,
-            state["query"],
+            query,
         )
+        # Kept so the retry's own outcome can be judged against what the first
+        # attempt got wrong, which the first attempt's text is the only record of.
+        first_attempt = raw
+        accepted_pieces: list[str] = []
         try:
-            # No sink: the retry must not append to text the client already has.
-            raw = await _collect(build_retry_messages(messages, raw, correction))
+            # Silent: collected for validation; replayed below only if it passes.
+            raw, accepted_pieces, retry_stats = await _collect(
+                build_retry_messages(messages, raw, correction)
+            )
         except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
+            _account(None)
             logger.exception("retry after a rejected answer failed")
-            return {
-                "answer": GENERATION_FAILED_ANSWER,
-                "citations": [],
-                "has_sufficient_evidence": False,
-                "error": f"retry after rejection failed: {exc}",
-            }
+            return _telemetry(
+                answer=GENERATION_FAILED_ANSWER,
+                citations=[],
+                has_sufficient_evidence=False,
+                error=f"retry after rejection failed: {exc}",
+                outcome="retry-provider-error",
+            )
+        _account(retry_stats)
 
         if not raw.strip() or NOT_IN_DOCUMENTS in raw:
+            # Whether this decline is a Stage 4 miss or a Stage 5 failure depends
+            # entirely on why the first attempt was rejected, and guessing wrong
+            # buries a real defect. If the first answer contradicted a governing
+            # rule we measured in the evidence, then the gate demonstrably
+            # opened, the corpus does cover the question, and "couldn't find this
+            # in the documents" is simply false - it also makes a Stage 5 failure
+            # look like a Stage 4 recall miss to verify_generation, which is how
+            # the business-class fault was reported as a retrieval problem when it
+            # was neither. For any other rejection the existing reading stands: a
+            # cross-encoder false positive is a genuine "not in the documents".
+            if find_contradiction(query, first_attempt, chunks) is not None:
+                logger.info(
+                    "retry declined after contradicting the evidence; reporting a "
+                    "generation failure rather than a retrieval miss"
+                )
+                _log_summary("declined-after-contradiction")
+                return _telemetry(
+                    raw_answer=raw,
+                    answer=GENERATION_REJECTED_ANSWER,
+                    citations=[],
+                    has_sufficient_evidence=False,
+                    error=(
+                        "retry declined after the answer contradicted its evidence"
+                    ),
+                    outcome="declined-after-contradiction",
+                )
             logger.info("retry declined instead of answering; treating as no evidence")
-            return {
-                "raw_answer": raw,
-                "answer": NO_EVIDENCE_ANSWER,
-                "citations": [],
-                "has_sufficient_evidence": False,
-            }
+            _log_summary("declined")
+            return _telemetry(
+                raw_answer=raw,
+                answer=NO_EVIDENCE_ANSWER,
+                citations=[],
+                has_sufficient_evidence=False,
+                outcome="declined",
+            )
 
-        citations = build_citations(raw, chunks, state["query"])
-        ok, reason, correction = judge_answer(raw, chunks, len(citations))
+        citations = build_citations(raw, chunks, query)
+        ok, reason, correction = judge_answer(raw, chunks, len(citations), query)
         if not ok:
             # Both attempts failed. Surfacing the second one would show the user a
             # block restatement dressed as an answer, which for a policy tool is
@@ -324,26 +487,41 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
                 "answer still unacceptable after one retry (%s) for %r; "
                 "returning no-evidence rather than a restatement",
                 reason,
-                state["query"],
+                query,
             )
-            return {
-                "raw_answer": raw,
-                "answer": GENERATION_REJECTED_ANSWER,
-                "citations": [],
-                "has_sufficient_evidence": False,
-                "error": f"answer rejected after one retry: {reason}",
-            }
+            _log_summary("rejected-after-retry")
+            return _telemetry(
+                raw_answer=raw,
+                answer=GENERATION_REJECTED_ANSWER,
+                citations=[],
+                has_sufficient_evidence=False,
+                error=f"answer rejected after one retry: {reason}",
+                outcome="rejected-after-retry",
+            )
         logger.info("retry produced a usable answer: %s", reason)
+        _log_summary("answered-after-retry")
+        # Replay the retry's pieces to the sink: the first attempt never touched
+        # it so the client has seen nothing yet.
+        if sink is not None:
+            await _replay(accepted_pieces, sink)
+        return _telemetry(
+            raw_answer=raw,
+            answer=strip_markers(raw),
+            citations=citations,
+            outcome="answered-after-retry",
+        )
 
-    # The pieces of the *validated* generation are already on the sink for the
-    # common case (no rejection happened, so attempt 1 was the validated one). When
-    # a rejection did happen the retry ran silently, so nothing is pushed here: the
-    # `done` event's `answer` is authoritative and carries the corrected text.
-    return {
-        "raw_answer": raw,
-        "answer": strip_markers(raw),
-        "citations": citations,
-    }
+    # First attempt was accepted. Replay its pieces so the client receives
+    # incremental tokens from the validated answer.
+    _log_summary("answered")
+    if sink is not None:
+        await _replay(first_pieces, sink)
+    return _telemetry(
+        raw_answer=raw,
+        answer=strip_markers(raw),
+        citations=citations,
+        outcome="answered",
+    )
 
 
 def route_after_evidence(state: RAGState) -> str:

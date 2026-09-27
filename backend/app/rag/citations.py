@@ -25,22 +25,22 @@ import re
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
+from app.rag.grounding import MARKER, attribute_claims, cited_positions
 from app.schemas.chat import Citation
 from app.schemas.rag import RerankedChunk
 
 logger = get_logger(__name__)
 
-#: Bracketed citation markers. Deliberately strict about the contents - only
-#: digits and comma-separated digits - so a bracketed word in a quoted document
-#: ("see [Appendix]") is not read as a citation.
-#
+#: Bracketed citation markers. Re-exported from :mod:`app.rag.grounding`, which
+#: owns the pattern so that the resolution and attribution of a marker cannot
+#: drift apart. Deliberately strict about the contents - only digits and
+#: comma-separated digits - so a bracketed word in a quoted document ("see
+#: [Appendix]") is not read as a citation.
+#:
 #: The optional leading word absorbs the phrasing small models prefer ("as
 #: described in block [1]"). Matching it here means :func:`strip_markers` can
 #: remove the whole phrase instead of leaving "in block ," behind.
-_MARKER = re.compile(
-    r"(?:\b(?:block|blocks|source|sources|see)\b[\s:]*)?"
-    r"\[(\d{1,3}(?:\s*,\s*\d{1,3})*)\]"
-)
+_MARKER = MARKER
 
 #: Parens/brackets left empty once a marker was removed.
 _EMPTY_GROUP = re.compile(r"[\(\[\{]\s*[\)\]\}]")
@@ -141,14 +141,19 @@ def has_citation_markers(answer: str) -> bool:
     """True when the model's own text contains at least one ``[n]`` marker.
 
     Distinct from "did this answer end up with citations". A marker can be
-    emitted and then deliberately dropped by :func:`build_citations` because the
-    block it names scored below the evidence threshold, which is the citation
-    layer refusing to vouch for a weak block - not the model forgetting to cite.
+    emitted and then deliberately dropped by :func:`build_citations` because no
+    block cleared the evidence threshold while carrying the claim, which is the
+    citation layer refusing to vouch rather than the model forgetting to cite.
     Conflating the two once caused a correct, fully-marked answer to be judged
     uncited, retried, and then thrown away as a non-answer, on the grounds that
-    the reranker had scored the block at -5.319. Callers that need to know
+    the reranker had scored the named block at -5.319. Callers that need to know
     whether the *model* cited anything must ask this, not
     ``bool(build_citations(...))``.
+
+    :func:`build_citations` now re-resolves a marker onto a better-supported
+    block, which recovers some of the answers that used to land here, but the
+    distinction still has to be made: a model that cites nothing is retryable and
+    a claim no block supports is not.
     """
     return bool(_MARKER.search(answer or ""))
 
@@ -162,44 +167,54 @@ def build_citations(
     can key highlights on it. Markers outside the supplied range are ignored and
     logged rather than guessed at - an invented reference is worse than a missing
     one, because it would point a user at the wrong policy line.
+
+    Markers no longer decide *which* block is cited, only whether the model
+    claimed support at all. The block is resolved by content, in
+    :func:`~app.rag.grounding.attribute_claims`, because a marker index is the
+    model's guess at provenance and it guesses wrong often enough to matter:
+    measured against the sample policy, a correct "100 USD" answer pointed at the
+    per-destination allowance *table* (logit -5.32) rather than the prose block
+    stating the rule (logit +4.62), so the citation was dropped for naming a block
+    the evidence gate had rejected and the user saw a correct fact with nothing
+    to check it against. Resolving on content is not a loosening - a citation
+    still requires a block that clears the evidence threshold *and* demonstrably
+    carries the claim, and the model's own number wins whenever it survives both
+    tests.
     """
     settings = get_settings()
     by_position = {position: chunk for position, chunk in enumerate(chunks, start=1)}
     threshold = settings.evidence_min_score
 
-    ordered: list[int] = []
-    seen: set[int] = set()
-    for raw in _MARKER.findall(answer or ""):
-        # One marker may carry several positions, e.g. "[1, 3]".
-        for part in raw.split(","):
-            position = int(part)
-            if position not in by_position:
-                logger.warning(
-                    "answer cited [%d] but only %d block(s) were supplied",
-                    position,
-                    len(chunks),
-                )
-                continue
-            chunk = by_position[position]
-            # Never cite a block the reranker scored as non-evidence. The top-k
-            # handed to the model includes chunks that failed the threshold, and
-            # a weak model will happily cite one anyway - observed with
-            # qwen2.5:1.5b, which cited an accommodation-limits block (logit
-            # -2.48, relevance 0.08) to support a claim about taxi fares. That
-            # would highlight the wrong line of the policy, which is worse than
-            # showing no citation at all.
-            if chunk.score < threshold:
-                logger.warning(
-                    "dropping citation [%d]: logit %.3f is below the evidence "
-                    "threshold %.3f",
-                    position,
-                    chunk.score,
-                    threshold,
-                )
-                continue
-            if position not in seen:
-                seen.add(position)
-                ordered.append(position)
+    cited = cited_positions(answer)
+    for position in cited:
+        if position not in by_position:
+            logger.warning(
+                "answer cited [%d] but only %d block(s) were supplied",
+                position,
+                len(chunks),
+            )
+
+    ordered = attribute_claims(answer, chunks, threshold)
+
+    # Never cite a block the reranker scored as non-evidence. The top-k handed to
+    # the model includes chunks that failed the threshold, and a weak model will
+    # happily cite one anyway - observed with qwen2.5:1.5b, which cited an
+    # accommodation-limits block (logit -2.48, relevance 0.08) to support a claim
+    # about taxi fares. That would highlight the wrong line of the policy, which
+    # is worse than showing no citation at all. Reporting the named blocks that
+    # did not survive keeps that observable after attribution has had its say.
+    dropped = [
+        position
+        for position in dict.fromkeys(cited)
+        if position in by_position and position not in ordered
+    ]
+    if dropped:
+        logger.warning(
+            "dropping citation(s) %s: no block at or above the evidence threshold "
+            "%.3f carries the claim the marker points at",
+            dropped,
+            threshold,
+        )
 
     if chunks and not ordered:
         logger.warning(
