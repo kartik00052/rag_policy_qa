@@ -2,10 +2,10 @@
 
 > This file is the single source of truth for this project's scope, stack, and UI.
 > If a decision isn't written here, treat it as **not decided yet** — don't invent new
-> services, layouts, or dependencies. Sections marked **(V1)** must be built now.
+> services, layouts, colors, or dependencies. Sections marked **(V1)** must be built now.
 > Sections marked **(V2)** are fully specified so nothing is ambiguous later, but must
 > NOT be implemented yet — don't scaffold routes, tables, or components for them until
-> V1's Definition of Done (Section 14) is met.
+> V1's Definition of Done (Section 16) is met.
 
 ---
 
@@ -38,9 +38,10 @@ answer alone.
 - Parse into structured chunks (headings, sections, tables preserved)
 - Hybrid search (dense + keyword) over chunks
 - Reranking of retrieved chunks before they reach the LLM
-- Three-pane chat workspace with a real document evidence viewer (Section 10)
+- Three-pane chat workspace with a real document evidence viewer (Section 11)
 - Streaming answers
 - Basic document list / upload flow
+- Light + dark theme, both fully designed (Section 10) — this is V1, not a stretch goal
 - Single-tenant, single set of users — no per-department permissions yet
 
 ### Explicitly Out of Scope for V1
@@ -48,8 +49,8 @@ answer alone.
 - Celery / background job workers (ingestion runs inline; async endpoint only if trivial)
 - OpenSearch/Elasticsearch (Qdrant only)
 - Multi-tenant RBAC/ABAC, SSO/OIDC, per-document access control
-- **Policy comparison feature** — fully designed in Section 12, build in V2
-- **Admin dashboard** — fully designed in Section 13, build in V2
+- **Policy comparison feature** — fully designed in Section 13, build in V2
+- **Admin dashboard** — fully designed in Section 14, build in V2
 - Query decomposition, HyDE, agent/multi-agent workflows
 - Fine-tuning any model
 - Observability stack (OpenTelemetry/Prometheus/Grafana)
@@ -151,7 +152,7 @@ conversations      id, user_id, title, created_at
 messages           id, conversation_id, role, content, created_at
 citations          id, message_id, document_id, page_number, section, relevance_score
 ```
-No `permissions`, `document_versions`, or `audit_logs` tables in V1 — see Section 13 for
+No `permissions`, `document_versions`, or `audit_logs` tables in V1 — see Section 14 for
 what the schema grows into when the admin dashboard is built.
 
 ---
@@ -198,7 +199,7 @@ viewer. Without it, evidence mode can't work.
 |---|---|
 | Framework | React + TypeScript, **Vite** |
 | Styling | **Tailwind CSS v4** |
-| Component system | **shadcn/ui**, Base UI primitives, **Nova** style preset (base only — Section 9 covers overrides) |
+| Component system | **shadcn/ui**, Base UI primitives, **Nova** style preset (base only — Sections 9–10 cover overrides) |
 | Animation | **Framer Motion** — functional use only, per Section 9 |
 | Server state | **TanStack Query** |
 | Client state | **Zustand** |
@@ -235,24 +236,35 @@ interface EvidenceStore {
   openCitation: (citation: Citation) => void;
   close: () => void;
 }
+
+// themeStore.ts   ← drives Section 10's theme system
+interface ThemeStore {
+  theme: "light" | "dark";
+  toggle: () => void;
+  // on init: read localStorage, fall back to prefers-color-scheme, then apply
+  // by setting document.documentElement.dataset.theme = theme
+}
 ```
 The Evidence panel is driven entirely by `evidenceStore` — clicking any citation chip
 anywhere in the app calls `openCitation()`, nothing else needs to know about the panel.
+`themeStore` is read once at app boot to set `data-theme` on `<html>`, then only touched
+by the theme toggle control in the top bar.
 
 ---
 
-## 9. Visual Identity Rules — V1
+## 9. Visual Identity Principles — V1
 
 Do not build a generic "ChatGPT clone" or template SaaS dashboard (sidebar + navbar +
 plain card grid + one centered chat box, all default zinc/slate gray). That look is an
 instant tell of an undirected AI-generated UI and is a failure state for this project.
 
-1. **Typography carries the branding.** One distinctive serif or condensed display font
-   for the app name/headings, paired with a clean sans (Inter or similar) for body/UI
-   text. Don't leave the default shadcn font stack with no personality.
-2. **One deliberate accent color**, used sparingly and consistently (citation chips,
-   active workspace indicator, streaming caret, highlight background) — not the default
-   shadcn zinc/slate palette with zero accent.
+1. **Typography carries the branding.** A distinctive serif/display font for the app
+   name and section headings, paired with a clean sans for body/UI text (see 10.4 for
+   the exact pairing). Don't leave the default shadcn font stack with no personality.
+2. **One deliberate accent color family**, used sparingly and consistently (citation
+   chips, active workspace indicator, streaming caret, highlight background) — see
+   Section 10 for the exact values. Never the default shadcn zinc/slate palette with
+   zero accent.
 3. **No decorative gradients, glow effects, or "AI purple/blue" hero treatments.** This
    is a professional reading/verification tool, closer to a well-designed IDE or
    research tool than a marketing landing page.
@@ -260,20 +272,127 @@ instant tell of an undirected AI-generated UI and is a failure state for this pr
    (compact rows, tight but legible line-height) over oversized template-SaaS padding —
    pairs naturally with the Nova preset.
 5. **Motion is functional only** (Framer Motion): evidence panel slide-in/out, citation
-   chip hover, streaming caret pulse, upload progress transitions. No page-load
-   fade-ins, bouncing cards, or animate-everything patterns.
+   chip hover, streaming caret pulse, upload progress transitions, theme cross-fade.
+   No page-load fade-ins, bouncing cards, or animate-everything patterns.
 6. **Empty/loading states are designed, not placeholders.** Every "nothing here yet"
    state gets real copy and layout, not a spinner or "No data" text.
 
 ---
 
-## 10. Component-Level UI Layouts — V1
+## 10. Color System & Theming — V1
 
-### 10.1 App shell (full workspace)
+**Direction:** a warm, editorial "espresso and brass" palette — dark theme reads like
+rich dark-roast coffee/leather, light theme reads like warm ivory paper, not clinical
+white. Same accent hue family in both modes so switching themes never feels like a
+different product. This is what separates the UI from default shadcn zinc/slate.
+
+### 10.1 Dark theme — "Espresso" (default)
+
+| Token | Hex | Used for |
+|---|---|---|
+| `--bg` | `#1C1410` | app background |
+| `--surface` | `#241A14` | sidebar, panels, cards |
+| `--surface-elevated` | `#2C2019` | evidence panel, popovers, dropdowns |
+| `--border` | `#3A2A21` | dividers, card borders, input borders |
+| `--text-primary` | `#F5EDE4` | body text, headings |
+| `--text-muted` | `#B5A395` | secondary text, timestamps, placeholders |
+| `--accent` | `#D9A55C` | active states, citation chips, buttons, streaming caret |
+| `--accent-hover` | `#E8B96F` | hover state of the above |
+| `--highlight` | `rgba(217,165,92,0.18)` | evidence matched-text background |
+| `--success` | `#7FA871` | "ready" status, muted sage (not neon green) |
+| `--warning` | `#C97B63` | "insufficient evidence" / low-confidence states |
+
+### 10.2 Light theme — "Ivory"
+
+| Token | Hex | Used for |
+|---|---|---|
+| `--bg` | `#FBF7F1` | app background (warm ivory, not `#FFFFFF`) |
+| `--surface` | `#F4EDE3` | sidebar, panels, cards |
+| `--surface-elevated` | `#FFFFFF` | evidence panel, popovers, dropdowns |
+| `--border` | `#E3D8C8` | dividers, card borders, input borders |
+| `--text-primary` | `#2A1F17` | body text, headings (echoes dark theme's bg tone) |
+| `--text-muted` | `#6E5D4E` | secondary text, timestamps, placeholders |
+| `--accent` | `#8A5A24` | active states, citation chips, buttons (darker shade for AA contrast on light bg) |
+| `--accent-hover` | `#A66B2C` | hover state of the above |
+| `--highlight` | `rgba(154,107,46,0.14)` | evidence matched-text background |
+| `--success` | `#4F7A45` | "ready" status |
+| `--warning` | `#A8503A` | "insufficient evidence" / low-confidence states |
+
+Both palettes share the same hue family (warm brown/amber) at different lightness —
+this is intentional so the brand reads as one consistent product across themes, not two
+different apps.
+
+### 10.3 Implementation
+
+Define both palettes as CSS custom properties in the global stylesheet, switched by a
+`data-theme` attribute on `<html>` (not a `.dark` class toggle, so it's explicit):
+
+```css
+:root, [data-theme="light"] {
+  --bg: #FBF7F1;
+  --surface: #F4EDE3;
+  /* ...rest of the Ivory table above */
+}
+
+[data-theme="dark"] {
+  --bg: #1C1410;
+  --surface: #241A14;
+  /* ...rest of the Espresso table above */
+}
+```
+
+Map these into Tailwind v4's `@theme` block so they're usable as ordinary utility
+classes (`bg-surface`, `text-primary`, `border-default`, `bg-accent`, etc.) rather than
+inline styles everywhere:
+
+```css
+@theme {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-border: var(--border);
+  --color-text-primary: var(--text-primary);
+  --color-text-muted: var(--text-muted);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+}
+```
+
+`themeStore.ts` (Section 8) sets `document.documentElement.dataset.theme` on toggle and
+persists the choice to `localStorage`; default on first visit follows
+`prefers-color-scheme`, defaulting to dark if unavailable. Theme toggle switch lives in
+the top bar (10.4/11.1) — a simple sun/moon Lucide icon toggle, with a brief opacity
+cross-fade (Framer Motion, ~150ms) on the root element when switching, not a hard cut.
+
+### 10.4 Typography pairing
+
+- **Display/headings** (app name, section titles like "ASK YOUR POLICIES", "EVIDENCE"):
+  a warm serif or condensed display font — e.g. **Fraunces** or **Lora** — used only
+  for headings and the wordmark, not body text.
+- **Body/UI text** (chat messages, buttons, labels, everything else): the Nova preset's
+  bundled **Geist**, kept as-is — no need to replace what's already good for dense UI
+  text.
+- This pairing (editorial serif headings + clean grotesk UI text) is what reads as
+  "premium document tool" rather than "default AI chat app."
+
+### 10.5 Where color is NOT used
+
+To keep the palette premium rather than busy: don't tint every panel or every icon with
+the accent color. Accent is reserved for interactive/active elements and the evidence
+highlight only. Structural chrome (sidebar, panels, borders) stays neutral (`bg`,
+`surface`, `border` tokens) so the warm accent actually stands out when it appears.
+
+---
+
+## 11. Component-Level UI Layouts — V1
+
+### 11.1 App shell (full workspace)
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│  HCL POLICY INTELLIGENCE                  Search     Profile │
+│  HCL POLICY INTELLIGENCE          Search   ☀/☾   Profile     │
 ├───────────────┬──────────────────────────────┬───────────────┤
 │               │                              │               │
 │ WORKSPACES    │       ASK YOUR POLICIES      │   EVIDENCE    │
@@ -284,7 +403,7 @@ instant tell of an undirected AI-generated UI and is a failure state for this pr
 │               │  └────────────────────────┘  │               │
 │ DOCUMENTS     │                              │  Source #2    │
 │               │  AI                          │  Page 44     │
-│ Travel Policy │  The policy states that...   │               │
+│ Travel Policy │  The policy states that...   │  Section 6.2.1│
 │ HR Handbook   │                              │               │
 │ Security      │  ──────────────────────────  │               │
 │               │                              │               │
@@ -292,17 +411,18 @@ instant tell of an undirected AI-generated UI and is a failure state for this pr
 │               │                              │               │
 └───────────────┴──────────────────────────────┴───────────────┘
 ```
-- Left pane fixed ~240px. Center pane fluid, max reading width ~720px. Right pane
-  ~360px, **collapsed to zero width by default** — this diagram shows it populated
-  after a citation click, not its default resting state.
+- Left pane fixed ~240px on `bg-surface`. Center pane fluid, max reading width ~720px
+  on `bg-bg`. Right pane ~360px on `bg-surface-elevated`, **collapsed to zero width by
+  default** — this diagram shows it populated after a citation click, not its default
+  resting state. `☀/☾` is the theme toggle described in 10.3.
 
-### 10.2 Left sidebar — detail states
+### 11.2 Left sidebar — detail states
 
 **Default (documents ready):**
 ```
 ┌───────────────┐
 │ WORKSPACES     │
-│ ● HR          ← active (accent-colored dot + text)
+│ ● HR          ← active (accent dot + accent text)
 │ ○ Finance      │
 │ ○ Security     │
 │───────────────│
@@ -322,7 +442,7 @@ instant tell of an undirected AI-generated UI and is a failure state for this pr
 ```
 Status text cycles through real pipeline stages (Parsing → Chunking → Embedding →
 Indexing → Ready) — not a generic "Loading…", since the backend already tracks these
-stages.
+stages. Progress fill uses `--accent`.
 
 **Empty state (no documents uploaded yet):**
 ```
@@ -336,7 +456,7 @@ stages.
 │   [ + Upload document ]│
 ```
 
-### 10.3 Center pane — chat thread
+### 11.3 Center pane — chat thread
 
 ```
                     ASK YOUR POLICIES
@@ -352,12 +472,13 @@ stages.
   │ Ask a follow-up...                    ➤ │
   └──────────────────────────────────────────┘
 ```
-- AI answers render as plain text on the page background — no chat-bubble container.
-- `[Travel Policy · p.43]` is a real inline clickable chip component, not literal text.
-- `▌` is the animated streaming caret (Framer Motion opacity pulse) shown only while
-  `isStreaming` is true.
+- AI answers render as plain text on `bg-bg` — no chat-bubble container.
+- `[Travel Policy · p.43]` is a real inline clickable chip: `bg-surface`, `border`,
+  `text-accent`, small Lucide document icon.
+- `▌` is the animated streaming caret (`text-accent`, Framer Motion opacity pulse)
+  shown only while `isStreaming` is true.
 
-**No-evidence-found response (still shown as a normal AI message, styled distinctly):**
+**No-evidence-found response (styled with `--warning`, still a normal AI message):**
 ```
   I couldn't find this in the uploaded documents.
   You may want to check with HR directly, or upload
@@ -378,7 +499,7 @@ stages.
   └──────────────────────────────────────────┘
 ```
 
-### 10.4 Right pane — Evidence panel
+### 11.4 Right pane — Evidence panel
 
 **Closed (default state — zero width, not just hidden content):**
 ```
@@ -425,12 +546,12 @@ stages.
 │ ──────────────────────────  │
 └────────────────────────────┘
 ```
-- `▓` marks the highlighted span matching `citation.matched_text` — implement as a
-  real background-highlight `<mark>`-style span, not literal block characters.
+- `▓` marks the highlighted span matching `citation.matched_text` — implement as a real
+  `<mark>`-style span using the `--highlight` token, not literal block characters.
 - Panel slides in from the right (Framer Motion `x` transform, ~250ms ease-out).
   Switching between sources cross-fades the content rather than closing/reopening.
 
-### 10.5 Upload flow
+### 11.5 Upload flow
 
 ```
 ┌──────────────────────────────────────┐
@@ -441,12 +562,12 @@ stages.
 │      PDF · DOCX · XLSX · CSV        │
 └──────────────────────────────────────┘
 ```
-After drop → immediately shows the sidebar processing state (10.2) — no separate modal
-or full-page "uploading" screen, keep the user in context.
+Dashed `--border` outline, `--accent` on drag-over. After drop → immediately shows the
+sidebar processing state (11.2) — no separate modal or full-page "uploading" screen.
 
 ---
 
-## 11. Frontend Folder Structure — V1
+## 12. Frontend Folder Structure — V1
 
 ```
 frontend/src/
@@ -455,11 +576,11 @@ frontend/src/
 │   ├── chat/               MessageThread.tsx, MessageBubble.tsx, CitationChip.tsx, ChatInput.tsx
 │   ├── evidence/           EvidencePanel.tsx, HighlightedPassage.tsx, SourceList.tsx
 │   ├── documents/          DocumentList.tsx, UploadDropzone.tsx, DocumentStatusBadge.tsx
-│   └── layout/             AppShell.tsx, WorkspaceSidebar.tsx, TopBar.tsx
+│   └── layout/             AppShell.tsx, WorkspaceSidebar.tsx, TopBar.tsx, ThemeToggle.tsx
 ├── pages/
 │   ├── Chat.tsx
 │   └── Documents.tsx
-├── stores/                 workspaceStore.ts, conversationStore.ts, evidenceStore.ts
+├── stores/                 workspaceStore.ts, conversationStore.ts, evidenceStore.ts, themeStore.ts
 ├── hooks/                  useChatStream.ts, useUploadDocument.ts
 ├── lib/                    api.ts, sse.ts, utils.ts
 └── types/                  document.ts, chat.ts, citation.ts
@@ -467,7 +588,7 @@ frontend/src/
 
 ---
 
-## 12. Policy Comparison — V2 (fully specified, do not build in V1)
+## 13. Policy Comparison — V2 (fully specified, do not build in V1)
 
 **Purpose:** let a user compare two versions of the same policy and see exactly what
 changed, with the same citation-backed trust as chat answers.
@@ -490,21 +611,21 @@ changed, with the same citation-backed trust as chat answers.
 ```
 - Two-column side-by-side layout, one version per column, sections aligned by heading
   so the same clause sits at the same vertical position in both columns.
-- Changed sections get a highlighted background (the app's single accent color, low
-  opacity — same treatment family as the Evidence panel highlight, for visual
-  consistency) plus a small "Change detected" indicator between the columns.
+- Changed sections use the `--highlight` token (same treatment family as the Evidence
+  panel highlight, for visual consistency) plus a small "Change detected" indicator
+  between the columns.
 - A summary strip above the columns: `Changed sections: 8 · Added: 3 · Removed: 2 · Modified: 3`.
-- Clicking a changed section can open the same Evidence-panel pattern from Section 10.4
-  to show the full surrounding context of either version — reuse that component rather
-  than building a new viewer.
+- Clicking a changed section reuses the Evidence-panel pattern from Section 11.4 to show
+  full surrounding context of either version — reuse that component rather than
+  building a new viewer.
 
-### Backend additions required for this (V2 only)
+### Backend additions required (V2 only)
 ```
 document_versions   id, document_id, version_label, storage_path, created_at
 ```
-Comparison logic: retrieve matching sections from both versions by heading path,
-diff at the paragraph level, and have the LLM summarize the nature of each change
-(not just a raw text diff) with citations into both versions.
+Comparison logic: retrieve matching sections from both versions by heading path, diff
+at the paragraph level, have the LLM summarize the nature of each change (not just a raw
+text diff) with citations into both versions.
 
 ### API (V2)
 ```
@@ -513,7 +634,7 @@ POST /api/v1/comparisons     { document_id, version_a, version_b } → diff + su
 
 ---
 
-## 13. Admin Dashboard — V2 (fully specified, do not build in V1)
+## 14. Admin Dashboard — V2 (fully specified, do not build in V1)
 
 **Purpose:** a separate, role-gated view for authorized users only (e.g. company/policy
 heads) to monitor the system and manage documents at an organizational level — this is
@@ -558,11 +679,10 @@ or its nav entry.
   (`has_sufficient_evidence` + relevance scores) and which documents were cited — this
   is what lets a policy head spot gaps in the document set (frequently-asked questions
   with low confidence = a policy that needs to be clarified or uploaded).
-- Keep the same visual identity rules from Section 9 (typography, single accent color,
-  density) — this must look like the same product, not a bolted-on generic admin
-  template.
+- Same color system and typography as Sections 9–10 — this must look like the same
+  product, not a bolted-on generic admin template. Low-confidence rows use `--warning`.
 
-### Backend additions required for this (V2 only)
+### Backend additions required (V2 only)
 ```
 users.role                    add column: 'member' | 'admin'
 query_logs   id, conversation_id, question, has_sufficient_evidence,
@@ -580,7 +700,7 @@ GET  /api/v1/admin/query-logs       paginated, filterable by confidence
 
 ---
 
-## 14. Environment Variables (backend/.env)
+## 15. Environment Variables (backend/.env)
 
 ```
 DATABASE_URL=postgresql+psycopg://postgres:postgres@postgres:5432/rag_policy
@@ -592,14 +712,41 @@ EMBEDDING_MODEL=<set explicitly>
 
 ---
 
-## 15. Definition of Done for V1
+## 16. Definition of Done for V1
 
 A working demo where a user can:
 1. Upload a PDF/DOCX/XLSX policy document and see it reach "ready" status
 2. Ask a question in chat and get a streamed answer with inline citation chips
 3. Click a citation and see the exact source passage highlighted in the Evidence panel
 4. Get an honest "not found in the documents" response when the answer isn't there
-5. Look at the UI and not immediately think "this is a generic AI-generated dashboard"
+5. Switch between the Espresso dark theme and Ivory light theme with no layout jumps
+6. Look at the UI and not immediately think "this is a generic AI-generated dashboard"
 
-Only after this is solid and demoed should Section 12 (Comparison) or Section 13
+Only after this is solid and demoed should Section 13 (Comparison) or Section 14
 (Admin Dashboard) be started.
+
+---
+
+## 17. Revision History
+
+This file has been built up in passes, each covering a distinct concern rather than
+patching randomly — keeping that separation on future edits will keep it usable:
+
+- **v1 — Scope & stack:** established V1 boundaries, backend RAG pipeline (hybrid
+  retrieval + rerank + evidence-gating), DB schema, and core API contract.
+- **v2 — UI direction:** added the three-pane app shell concept and explicit rules
+  against a generic "AI-generated dashboard" look; introduced Zustand store shapes.
+- **v3 — Component-level layouts:** broke the UI down into per-component wireframes
+  (sidebar states, chat pane states, evidence panel states, upload flow) so nothing
+  about the interaction design is left implicit.
+- **v4 — V2 features specified early:** fully designed Policy Comparison and the
+  role-gated Admin Dashboard now, while keeping both explicitly out of V1's build
+  scope — so the eventual work is unambiguous without letting V1 scope-creep.
+- **v5 — Color system (this pass):** replaced the placeholder "one deliberate accent
+  color" instruction with a concrete, named dark ("Espresso") and light ("Ivory")
+  palette sharing one warm brown/amber hue family, plus the CSS-variable/Tailwind
+  implementation and a typography pairing — closing the last "figure it out yourself"
+  gap that could have led to a generic-looking result.
+
+If you add a new pass later, append to this list rather than rewriting history — it's
+useful context for anyone (human or agent) picking this file up mid-project.
