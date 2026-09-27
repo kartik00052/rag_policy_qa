@@ -143,6 +143,80 @@ def reciprocal_rank_fusion(
     return sorted(fused.values(), key=lambda s: (-s.rrf_score, s.hit.point_id))
 
 
+def to_retrieved_chunks(fused: list[_Scored], limit: int) -> list[RetrievedChunk]:
+    """Project fused results onto the public chunk shape.
+
+    Split out of :func:`hybrid_search` so the Stage 5 graph can reuse the exact
+    mapping instead of rebuilding it (WORKFLOW.md Section 2: one place owns the
+    projection). Ranking semantics are unchanged.
+    """
+    return [
+        RetrievedChunk(
+            point_id=entry.hit.point_id,
+            score=entry.rrf_score,
+            document_id=uuid.UUID(entry.hit.payload["document_id"]),
+            filename=entry.hit.payload.get("filename", ""),
+            chunk_index=int(entry.hit.payload.get("chunk_index", 0)),
+            page_number=entry.hit.payload.get("page_number"),
+            section=entry.hit.payload.get("section", ""),
+            heading_path=list(entry.hit.payload.get("heading_path") or []),
+            content=entry.hit.payload.get("content", ""),
+            content_type=entry.hit.payload.get("content_type", "text"),
+            dense_score=entry.dense_score,
+            sparse_score=entry.sparse_score,
+            dense_rank=entry.dense_rank,
+            sparse_rank=entry.sparse_rank,
+        )
+        for entry in fused[:limit]
+    ]
+
+
+def hits_to_retrieved_chunks(hits: list[_Hit]) -> list[RetrievedChunk]:
+    """Project one arm's raw hits onto the public chunk shape.
+
+    ``score`` is the arm's own score (cosine or BM25), not an RRF score. The
+    two are not comparable across arms, which is exactly why fusion uses ranks;
+    this projection exists for the debug surface, where the arm score is the
+    point.
+    """
+    return [
+        RetrievedChunk(
+            point_id=hit.point_id,
+            score=hit.score,
+            document_id=uuid.UUID(hit.payload["document_id"]),
+            filename=hit.payload.get("filename", ""),
+            chunk_index=int(hit.payload.get("chunk_index", 0)),
+            page_number=hit.payload.get("page_number"),
+            section=hit.payload.get("section", ""),
+            heading_path=list(hit.payload.get("heading_path") or []),
+            content=hit.payload.get("content", ""),
+            content_type=hit.payload.get("content_type", "text"),
+        )
+        for hit in hits
+    ]
+
+
+async def retrieve_arms(
+    query: str, candidate_limit: int = 30, document_ids: list[uuid.UUID] | None = None
+) -> tuple[list[_Hit], list[_Hit], list[_Scored]]:
+    """Run both arms and fuse, returning ``(dense, sparse, fused)``.
+
+    The Stage 5 graph needs the per-arm hits alongside the fused list so its
+    state can carry ``dense_results`` and ``sparse_results`` as PROJECT.md
+    Section 4 specifies. This delegates to the same functions
+    :func:`hybrid_search` uses, so the two paths cannot drift.
+    """
+    collection = await ensure_collection(dense_dimension())
+    total_points = (await get_qdrant_client().count(collection, exact=True)).count
+    if not total_points:
+        return [], [], []
+
+    dense = await dense_search(query, limit=candidate_limit, document_ids=document_ids)
+    sparse = await sparse_search(query, limit=candidate_limit, document_ids=document_ids)
+    fused = reciprocal_rank_fusion([dense, sparse])
+    return dense, sparse, fused
+
+
 async def hybrid_search(
     query: str,
     limit: int = 10,
@@ -174,25 +248,7 @@ async def hybrid_search(
     fused = reciprocal_rank_fusion([dense, sparse])
     fusion_ms = (time.perf_counter() - started) * 1000
 
-    results = [
-        RetrievedChunk(
-            point_id=entry.hit.point_id,
-            score=entry.rrf_score,
-            document_id=uuid.UUID(entry.hit.payload["document_id"]),
-            filename=entry.hit.payload.get("filename", ""),
-            chunk_index=int(entry.hit.payload.get("chunk_index", 0)),
-            page_number=entry.hit.payload.get("page_number"),
-            section=entry.hit.payload.get("section", ""),
-            heading_path=list(entry.hit.payload.get("heading_path") or []),
-            content=entry.hit.payload.get("content", ""),
-            content_type=entry.hit.payload.get("content_type", "text"),
-            dense_score=entry.dense_score,
-            sparse_score=entry.sparse_score,
-            dense_rank=entry.dense_rank,
-            sparse_rank=entry.sparse_rank,
-        )
-        for entry in fused[:limit]
-    ]
+    results = to_retrieved_chunks(fused, limit)
 
     logger.info(
         "hybrid_search '%s': dense=%d sparse=%d fused=%d in %.1fms",

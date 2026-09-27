@@ -7,12 +7,13 @@ from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
 
-from app.api import debug, documents, health
+from app.api import chat, debug, documents, health
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.db.session import dispose_engine
 from app.schemas.health import ServiceInfo
 from app.services import documents as documents_service
+from app.services.llm import close_llm
 from app.services.qdrant import close_qdrant
 
 logger = get_logger(__name__)
@@ -34,6 +35,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("interrupted-document reconciliation failed")
     yield
     logger.info("shutting down")
+    await close_llm()
     await close_qdrant()
     await dispose_engine()
 
@@ -44,13 +46,15 @@ def create_app() -> FastAPI:
         title=settings.app_name,
         version="0.1.0",
         description=(
-            "RAG Policy Assistant backend. Stages 0-3 of WORKFLOW.md: skeleton, "
-            "data layer, document ingestion, hybrid retrieval."
+            "RAG Policy Assistant backend. Stages 0-6 of WORKFLOW.md: skeleton, "
+            "data layer, document ingestion, hybrid retrieval, reranking with an "
+            "evidence gate, LangGraph answer generation, and streaming chat."
         ),
         lifespan=lifespan,
     )
     app.include_router(health.router)
     app.include_router(documents.router)
+    app.include_router(chat.router)
     app.include_router(debug.router)
 
     @app.get("/", response_model=ServiceInfo, include_in_schema=False)

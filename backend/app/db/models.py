@@ -144,7 +144,15 @@ class Message(Base):
 
 class Citation(Base):
     """PROJECT.md Section 5: citations — id, message_id, document_id,
-    page_number, section, relevance_score."""
+    page_number, section, relevance_score.
+
+    ``matched_text`` is an addition to that list, made in Stage 6 and recorded
+    in migration 6c1d4a8b2f70. Section 5 does not list it, but Section 6 defines
+    ``matched_text`` as part of the citation API object and requires it to be the
+    literal substring used for verbatim highlighting. A stored conversation is
+    replayed from these rows, so the excerpt has to survive the request. It is
+    nullable so pre-migration rows and uncited answers both remain representable.
+    """
 
     __tablename__ = "citations"
 
@@ -162,5 +170,6 @@ class Citation(Base):
     page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     relevance_score: Mapped[float] = mapped_column(Float, nullable=False)
+    matched_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     message: Mapped[Message] = relationship(back_populates="citations")
