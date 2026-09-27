@@ -265,6 +265,40 @@ _CONNECTOR_WORDS = frozenset(
     }
 )
 
+#: A connective that cannot end a sentence, so it only ever appears mid-clause
+#: governing something that follows it. Listed as alternatives for the regex
+#: rather than derived from :data:`_CONNECTOR_WORDS`, which is the opposite case:
+#: those words are legal sentence endings in an *uncited* answer and are only
+#: stranded when the marker is the last thing in the sentence, so removing them
+#: there would damage text that needed no repair.
+#:
+#: "according to" and "as ... in" are multi-word and are spelled out because a
+#: word-boundary alternation would match only "as" or only "to" and leave the
+#: other half behind, which is the same dangling-connector bug in miniature.
+_DANGLING_LEAD = (
+    r"(?:"
+    r"according\s+to"
+    r"|as\s+(?:per|stated|described|listed|shown|documented|defined|specified)"
+    r"(?:\s+in|\s+by)?"
+    r"|(?:per|under|with|from|by|in|on|at|of|to|as)"
+    r")\b[\s:]*"
+)
+
+#: A connective, a marker, and the comma that closed the parenthetical, all of
+#: which are removed together. Observed verbatim from the contradiction-retry
+#: path: "No, according to [1], economy class must be booked for all flights
+#: under 6 hours." Removing the marker alone left "No, according to, economy
+#: class must be booked", which reads as a truncation.
+#:
+#: The trailing comma is what makes this safe and is why it is not simply
+#: "strip a dangling connective". The comma proves the marker was parenthetical
+#: - inserted into the clause and set off by punctuation, rather than carrying
+#: the sentence's own syntax. Without that evidence the connective is load
+#: bearing: "The cap is described in [2]." needs its "in" until
+#: :func:`_drop_dangling_connectors` decides the whole sentence was an aside, and
+#: "Leave is 25 days per year [1]." has no comma to key off at all.
+_PARENTHETICAL = re.compile(_DANGLING_LEAD + _MARKER.pattern + r"\s*,")
+
 _SENTENCE_TAIL = re.compile(r"([^.!?]*)([.!?])")
 
 
@@ -307,10 +341,18 @@ answer: str) -> str:
     ``"This information comes from [1]."`` reads as ``"This information."`` rather
     than ``"This information comes from."`` - observed verbatim from qwen2.5:3b
     during prompt-injection verification.
+
+    A marker sitting inside a parenthetical takes its connective and its closing
+    comma with it, so ``"No, according to [1], economy class must be booked"``
+    becomes ``"No, economy class must be booked"`` - also observed verbatim, from
+    the contradiction-retry path, where the model was told to justify its
+    correction against a specific block. See :data:`_PARENTHETICAL` for why the
+    comma is required and why a bare dangling connective is left alone.
     """
     if not answer:
         return ""
-    cleaned = _MARKER.sub("", answer)
+    cleaned = _PARENTHETICAL.sub("", answer)
+    cleaned = _MARKER.sub("", cleaned)
     cleaned = _EMPTY_GROUP.sub("", cleaned)
     # Collapse the runs of spaces left behind, but keep paragraph breaks intact.
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)

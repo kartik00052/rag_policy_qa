@@ -41,7 +41,7 @@ never attributes to a block below the evidence threshold.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
@@ -180,19 +180,71 @@ class Claim:
     positions: tuple[int, ...]
 
 
+#: Punctuation and quoting that can be all a marker-fragment leaves behind once
+#: the marker itself is removed. ``"`` and ``'`` are included because
+#: ``"[1]"`` is often written inside them.
+_RESIDUE = ".,;:-\u2013\u2014\"'()[]"
+
+
+def _prose_left(text: str) -> bool:
+    """True when *text* says something beyond its own citation markers.
+
+    The residue trim is what makes this a test about *content* rather than about
+    formatting: a fragment of ``"[1]."`` or ``"(see [2])"`` is pure citation
+    apparatus, and treating it as a claim would strand its marker instead of
+    re-attaching it to the sentence it belongs to.
+
+    Whitespace is stripped before and after the punctuation set, not merely
+    folded into it: ``"[1] [2]"`` leaves a single space behind once both markers
+    are gone, and a bare space is truthy, so trimming punctuation alone would
+    have read a two-marker fragment as prose and stranded both.
+    """
+    residue = MARKER.sub("", text).strip().strip(_RESIDUE).strip()
+    return bool(residue)
+
+
 def claims_of(answer: str) -> list[Claim]:
     """Split the answer into sentences, each carrying its own citation markers.
 
     Attribution is per-claim rather than per-answer because a single answer can
     draw on two different blocks. Resolving a marker against the whole answer
     would let the vocabulary of the first sentence vouch for the second.
+
+    A fragment that is *only* a marker - ``"...is 100 USD. [2]"`` splits into a
+    claim and a bare ``"[2]"`` - is not a claim at all. Markers are an
+    instruction to the model, so a fragment carrying no prose carries no content
+    to attribute, and treating it as a claim silently destroyed the citation for
+    the real sentence: :func:`attribute_claims` skips claims with no markers, so
+    the sentence the marker belonged to was dropped on the floor, and the
+    marker's own fragment scored zero coverage against every block and was
+    dropped too. That is the whole of the measured "correct answer, no
+    citation" fault, and it fired whenever a model placed the marker after the
+    full stop rather than against the clause - which is a normal thing for a
+    model to do and not something to be defended against downstream. The
+    orphan's positions are therefore re-attached to the neighbouring claim
+    instead of being stranded, preferring the one before it (the case that
+    occurs) and falling back to the one after when the orphan leads.
     """
     claims: list[Claim] = []
+    leading: list[int] = []
     for sentence in _SENTENCE_SPLIT.split(answer or ""):
         text = sentence.strip()
         if not text:
             continue
-        claims.append(Claim(text=text, positions=tuple(cited_positions(text))))
+        positions = tuple(cited_positions(text))
+        if not _prose_left(text):
+            if claims:
+                previous = claims[-1]
+                claims[-1] = replace(
+                    previous, positions=previous.positions + positions
+                )
+            else:
+                leading.extend(positions)
+            continue
+        if leading:
+            positions = tuple(leading) + positions
+            leading.clear()
+        claims.append(Claim(text=text, positions=positions))
     return claims
 
 
@@ -235,6 +287,16 @@ def attribute_claims(
       is re-attributed by content**, and dropped entirely if no block carries it.
       That is the measured meal-allowance fault: the model named a block the
       threshold had already rejected, and today that loses the citation.
+
+    The skip on marker-less claims is deliberate and is the one case this
+    function refuses to be clever about. A sentence the model chose not to cite
+    is not evidence of anything, and attributing it by content alone would
+    invent support the model did not claim. That guard is correct - it is also
+    exactly what made a *cited* answer lose its citation, because the marker
+    the model did emit landed in its own sentence fragment (see
+    :func:`claims_of`), leaving the sentence carrying the content unmarked and
+    the marker's fragment empty. The guard is now fed claims whose markers are
+    attached to the text they belong to.
     """
     if not chunks:
         return []

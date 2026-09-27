@@ -215,6 +215,15 @@ MEAL_BLOCKS = blocks(
 #: The same claim with the marker removed, which is what attribution measures.
 MARKER_REMOVED_MEAL_CLAIM = "The daily meal allowance is 100 USD for international travel."
 
+#: How the model *actually* answered, captured from ``POST /_debug/ask`` in the
+#: session that found the fault. It differs from :data:`MEAL_WRONG_BLOCK` in one
+#: character that matters: the marker sits after the full stop, in its own
+#: sentence fragment. The in-sentence fixture above therefore never exercised the
+#: failure, which is how the original fix shipped green.
+MEAL_MARKER_AFTER_STOP = (
+    "The daily meal allowance for an international trip is 100 USD. [2]"
+)
+
 
 def test_content_beat_the_models_choice_of_block() -> None:
     """The measured fault: [2] is below the threshold, so it cannot be cited."""
@@ -300,6 +309,67 @@ def test_nothing_is_attributed_when_every_block_is_below_the_threshold() -> None
         ("6.2 Reimbursement Limits", LIMITS, -0.2),
     )
     assert attribute_claims(MEAL_WRONG_BLOCK, demoted, threshold=0.0) == []
+
+
+# --- an orphaned marker fragment ---------------------------------------------
+
+
+def test_a_marker_after_the_full_stop_still_attributes_to_its_own_sentence() -> None:
+    """The shipped fault, verbatim: a correct answer that cited nothing.
+
+    A model that writes the marker as its own sentence is normal, not adversarial.
+    Before the fix the marker became a fragment of its own, the sentence that
+    actually carried the claim was left unmarked and skipped, and the citation
+    was lost - with the evidence gate reporting it could not find support for a
+    claim that was just the string ``"[2]"``.
+    """
+    claims = claims_of(MEAL_MARKER_AFTER_STOP)
+    assert len(claims) == 1
+    assert claims[0].positions == (2,)
+    # The re-attribution to the prose block, at the exact logits measured live.
+    assert attribute_claims(MEAL_MARKER_AFTER_STOP, MEAL_BLOCKS, threshold=0.0) == [1]
+    citations = build_citations(MEAL_MARKER_AFTER_STOP, MEAL_BLOCKS, MEAL_QUERY)
+    assert [c.id for c in citations] == ["c1"]
+    # Never onto the table the model named: still below the evidence threshold.
+    assert citations[0].page == 1
+
+
+def test_an_orphaned_marker_leading_the_answer_joins_the_next_claim() -> None:
+    """Mirror image: nothing precedes it, so it attaches forwards."""
+    claims = claims_of("[1] The cap is 25 days. Claims must be filed [2].")
+    assert [c.positions for c in claims] == [(1,), (2,)]
+
+
+def test_several_orphan_fragments_all_reach_their_claim() -> None:
+    """One prose sentence can be trailed by more than one bare marker."""
+    claims = claims_of("The cap is 25 days. [1] [2]")
+    assert len(claims) == 1
+    assert claims[0].positions == (1, 2)
+
+
+def test_marker_only_apparatus_is_not_mistaken_for_a_claim() -> None:
+    """A fragment with no prose carries no content to attribute."""
+    for fragment in ("[1].", "(see [2])", "[3],"):
+        assert claims_of(fragment) == [] or not any(
+            c.positions for c in claims_of(fragment)
+        )
+
+
+def test_a_claim_the_model_never_cited_is_still_left_alone() -> None:
+    """The guard the fix had to route around, not remove.
+
+    Re-attributing a sentence the model chose not to cite would invent support
+    it never claimed, so a claim with no marker anywhere must stay uncited even
+    when a block covers it completely.
+    """
+    assert attribute_claims(MARKER_REMOVED_MEAL_CLAIM, MEAL_BLOCKS, threshold=0.0) == []
+
+
+def test_a_genuine_second_claim_is_not_absorbed_by_an_orphan() -> None:
+    """Merging is scoped to marker-only fragments, not to short sentences."""
+    claims = claims_of("Yes. The cap is 25 days. [2]")
+    assert [c.text for c in claims] == ["Yes.", "The cap is 25 days."]
+    assert [c.positions for c in claims] == [(), (2,)]
 
 
 # --- lexical primitives ------------------------------------------------------

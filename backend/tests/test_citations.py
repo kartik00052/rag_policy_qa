@@ -108,3 +108,57 @@ def test_trailing_connectors_only_never_eat_real_content() -> None:
         == "Accrual is 1.75 days per month."
     )
     assert strip_markers("The cap is 25 days [1].") == "The cap is 25 days."
+
+
+# --- markers inside a parenthetical ------------------------------------------
+
+
+def test_a_parenthetical_marker_takes_its_connective_and_comma_with_it() -> None:
+    """Observed verbatim from the contradiction-retry path.
+
+    The retry asked the model to justify its correction against a specific block,
+    and it wrote the citation as a parenthetical. Stripping only the marker left
+    "No, according to, economy class must be booked" - a connective pointing at
+    nothing, which reads as a truncated answer to the user.
+    """
+    assert strip_markers(
+        "No, according to [1], economy class must be booked for all flights "
+        "under 6 hours."
+    ) == "No, economy class must be booked for all flights under 6 hours."
+    # The marker's own optional lead word is part of the same parenthetical.
+    assert (
+        strip_markers("No, according to block [1], economy class is required.")
+        == "No, economy class is required."
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        # Multi-word leads, so a word-boundary alternation would strand half.
+        ("The cap is 25 days, as stated in [1], per the handbook.",
+         "The cap is 25 days, per the handbook."),
+        ("The cap is 25 days, as described by [2], in the appendix.",
+         "The cap is 25 days, in the appendix."),
+    ],
+)
+def test_multi_word_connectives_are_removed_whole(raw: str, expected: str) -> None:
+    assert strip_markers(raw) == expected
+
+
+def test_a_load_bearing_connective_is_never_removed() -> None:
+    """The comma is the guard that makes the removal safe, so it is load-bearing.
+
+    Without a comma after the marker the connective belongs to the sentence's own
+    syntax, and the sentence-tail rule decides the question instead - which drops
+    an aside sentence outright rather than chipping words off the end of real
+    prose.
+    """
+    # No comma: the sentence-tail rule owns this, and the whole aside goes.
+    assert strip_markers("The cap is described in [2].") == ""
+    # No comma and no sentence-final connective: nothing is touched at all.
+    assert (
+        strip_markers("Leave is 25 days per year [1].")
+        == "Leave is 25 days per year."
+    )
+    assert strip_markers("The cost is 100 USD [1].") == "The cost is 100 USD."
