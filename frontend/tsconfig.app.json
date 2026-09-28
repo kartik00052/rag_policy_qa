@@ -16,6 +16,16 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Path aliases. Repeated from the root tsconfig.json on purpose: this file is
+       a referenced project, and a project reference does not inherit the root
+       compilerOptions. Without these, Vite resolves "@/..." at dev time but
+       `tsc -b` (i.e. `npm run build`) fails to resolve the same specifiers.
+       No `baseUrl`: it is deprecated as of TypeScript 6 and `paths` entries are
+       resolved relative to this file regardless. */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
