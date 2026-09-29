@@ -33,6 +33,7 @@ export function AppShell() {
               : undefined
           }
           onRetry={() => void documentsQuery.refetch()}
+          slowIds={documentsQuery.slowIds()}
         />
 
         {/*

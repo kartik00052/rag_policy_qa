@@ -31,12 +31,14 @@ export function WorkspaceSidebar({
   isError,
   errorMessage,
   onRetry,
+  slowIds,
 }: {
   documents: ReturnType<typeof useWorkspaceStore.getState>["documents"];
   isLoading: boolean;
   isError: boolean;
   errorMessage?: string;
   onRetry: () => void;
+  slowIds?: Set<string>;
 }) {
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const setActiveWorkspace = useWorkspaceStore((state) => state.setActiveWorkspace);
@@ -84,6 +86,7 @@ export function WorkspaceSidebar({
             isError={isError}
             errorMessage={errorMessage}
             onRetry={onRetry}
+            slowIds={slowIds}
           />
         </div>
 

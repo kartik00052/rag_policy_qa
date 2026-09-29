@@ -29,12 +29,15 @@ export function DocumentList({
   isError,
   errorMessage,
   onRetry,
+  slowIds,
 }: {
   documents: DocumentSummary[];
   isLoading: boolean;
   isError: boolean;
   errorMessage?: string;
   onRetry: () => void;
+  /** Documents non-terminal for longer than the slow threshold. */
+  slowIds?: Set<string>;
 }) {
   if (isError) {
     return (
@@ -138,6 +141,20 @@ export function DocumentList({
               <p className="mt-1 pl-[19px] text-[12px] leading-snug text-warning">
                 Ingestion failed. This document cannot be searched or cited.
                 Re-upload the file to try again.
+              </p>
+            ) : null}
+
+            {/*
+              A document that has been mid-pipeline far longer than the rest is
+              not the same as one that is merely still working, and saying so is
+              the difference between "wait" and "this looks stuck". Deliberately
+              not an error: the request succeeded and ingestion may still finish,
+              so the copy says what is known without claiming failure.
+            */}
+            {processing && slowIds?.has(document.id) ? (
+              <p className="mt-1 pl-[19px] text-[12px] leading-snug text-text-muted">
+                Taking longer than expected. Still retrying — a large document
+                can spend several minutes in Embedding.
               </p>
             ) : null}
 

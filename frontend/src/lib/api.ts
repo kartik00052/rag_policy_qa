@@ -19,10 +19,10 @@ import type {
 } from "@/types/chat";
 import type {
   DocumentDetail,
-  DocumentStatus,
   DocumentSummary,
   DocumentUploadResponse,
 } from "@/types/document";
+import { ACCEPTED_SUFFIXES } from "@/types/document";
 
 const API_URL = (import.meta.env.VITE_API_URL as string | undefined) ?? "";
 
@@ -104,8 +104,11 @@ interface DocumentListResponse {
 
 export async function listDocuments(): Promise<DocumentSummary[]> {
   if (MOCK_ENABLED) {
-    const { MOCK_DOCUMENTS } = await import("./mock/fixtures");
-    return MOCK_DOCUMENTS.map((document) => ({ ...document }));
+    // The mock list is stateful, not a static array: it includes documents
+    // added by `uploadDocument` and advances them through the pipeline, so the
+    // polling loop is genuinely exercised rather than reading fixed rows.
+    const { mockList } = await import("./mock/documentStore");
+    return mockList();
   }
   const body = await request<DocumentListResponse>("/documents");
   return body.documents ?? [];
@@ -113,21 +116,31 @@ export async function listDocuments(): Promise<DocumentSummary[]> {
 
 export async function getDocument(documentId: string): Promise<DocumentDetail> {
   if (MOCK_ENABLED) {
-    const { MOCK_DOCUMENT_DETAIL } = await import("./mock/fixtures");
-    return { ...MOCK_DOCUMENT_DETAIL };
+    // Resolved from the stateful store, not a fixed fixture: a hardcoded
+    // detail made every document report the travel policy's stage position, so
+    // a stale per-document poller would look correct while being wrong for
+    // every document except one.
+    const { mockGet, mockDefaultDetail } = await import("./mock/documentStore");
+    return mockGet(documentId) ?? mockDefaultDetail();
   }
   return request<DocumentDetail>(`/documents/${documentId}`);
 }
 
 export async function uploadDocument(file: File): Promise<DocumentUploadResponse> {
   if (MOCK_ENABLED) {
-    // `uploading` is the honest immediate response: the real backend returns
-    // before ingestion finishes, and the sidebar shows the processing row from
-    // that first response onward.
-    return {
-      document_id: `mock-${Date.now()}`,
-      status: "uploading" satisfies DocumentStatus,
-    };
+    // Rejects unsupported types the same way the real backend's 400 does, so
+    // the dropzone's request-failure state is exercised in mock mode rather
+    // than only against a live server. Drag-and-drop bypasses the input's
+    // `accept` filter, so this is a genuinely reachable path.
+    const suffix = file.name.slice(file.name.lastIndexOf(".")).toLowerCase();
+    if (!ACCEPTED_SUFFIXES.includes(suffix as (typeof ACCEPTED_SUFFIXES)[number])) {
+      throw new ApiError(
+        400,
+        `Unsupported file type "${suffix || file.name}". Upload a PDF, DOCX, XLSX, or CSV.`,
+      );
+    }
+    const { mockUpload } = await import("./mock/documentStore");
+    return mockUpload(file.name, suffix.replace(".", ""));
   }
   const form = new FormData();
   form.append("file", file);

@@ -473,10 +473,28 @@ stages. Progress fill uses `--accent`.
   └──────────────────────────────────────────┘
 ```
 - AI answers render as plain text on `bg-bg` — no chat-bubble container.
-- `[Travel Policy · p.43]` is a real inline clickable chip: `bg-surface`, `border`,
+- `[Travel Policy · p.43]` is a real clickable chip: `bg-surface`, `border`,
   `text-accent`, small Lucide document icon.
 - `▌` is the animated streaming caret (`text-accent`, Framer Motion opacity pulse)
   shown only while `isStreaming` is true.
+
+**Deviation (as built) — citations render as a labelled `Sources` row, not inline.**
+The sketch above places chips mid-sentence. That is not achievable against the
+current backend contract: `done.answer` has the backend's `[n]` markers stripped
+server-side (the same change that fixed the "No, according to [1], economy…"
+dangling-fragment bug), so the exact character offset of each citation within
+the final text is not recoverable by the client. Recovering it would require
+fuzzy-matching `matched_text` back into the answer, which places chips at
+plausible-but-wrong positions and reads as a rendering bug.
+
+As built, each AI message's citations render in a `Sources` row directly beneath
+that message's text — labelled, indented to the message's own text column, and
+bordered on the left so the answer↔sources relationship is explicit rather than
+implied by adjacency. Same `CitationChip` component and same Evidence-panel
+behaviour as the inline design. The streaming caret still renders inline at the
+end of the answer text, since it follows the token stream and not a citation.
+Inline chips become possible if the backend is ever changed to preserve marker
+offsets in the streamed text; this is not a frontend-only change.
 
 **No-evidence-found response (styled with `--warning`, still a normal AI message):**
 ```
