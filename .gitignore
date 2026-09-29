@@ -28,3 +28,6 @@ backend/storage/
 # OS
 .DS_Store
 Thumbs.db
+
+# Visual Studio - per-machine solution state, Copilot snapshots and chat history
+.vs/
