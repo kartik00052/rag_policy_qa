@@ -30,23 +30,23 @@ FORMAT_BY_SUFFIX: dict[str, InputFormat] = {
     ".csv": InputFormat.CSV,
 }
 
-_converter: DocumentConverter | None = None
 _convert_lock = asyncio.Lock()
 
 
-def get_converter() -> DocumentConverter:
-    global _converter
-    if _converter is None:
-        _converter = DocumentConverter(
-            allowed_formats=list(FORMAT_BY_SUFFIX.values())
-        )
-        logger.info("docling converter initialised")
-    return _converter
+def create_converter() -> DocumentConverter:
+    """Create a DocumentConverter instance.
+
+    A fresh converter instance is created per conversion to prevent native
+    access violations (0xc0000005 in docling-parse C++ extension on Windows
+    when a single converter instance is reused across multiple conversions).
+    """
+    return DocumentConverter(allowed_formats=list(FORMAT_BY_SUFFIX.values()))
 
 
 def _convert_blocking(path: Path, suffix: str) -> DoclingDocument:
     del suffix  # format is inferred from the file; the converter allows all four
-    result = get_converter().convert(source=path)
+    converter = create_converter()
+    result = converter.convert(source=path)
 
     # raises_on_error defaults to True, but check the status explicitly so a
     # partial/failed conversion can never be chunked into a "ready" document.
