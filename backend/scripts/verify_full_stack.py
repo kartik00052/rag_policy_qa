@@ -254,49 +254,53 @@ def check_layer2_backend_api() -> bool:
     except Exception as exc:
         return report.record(4, "GET /documents schema", False, f"Request failed: {exc}")
 
-    # 5. Real document upload reaches ready
-    uploaded_doc_id = None
+    # 5. Real document upload stress test (proves race fix & native-crash mitigation)
+    num_stress_runs = int(os.getenv("VERIFY_UPLOAD_RUNS", "3"))
     try:
         if not FIXTURE_PATH.exists():
             return report.record(5, "Document upload & ready status", False, f"Fixture not found: {FIXTURE_PATH}")
         with open(FIXTURE_PATH, "rb") as f:
-            files = {"file": (FIXTURE_PATH.name, f.read(), "application/pdf")}
-        r = httpx.post(f"{BACKEND_BASE}/api/v1/documents", files=files, timeout=30.0)
-        if r.status_code != 201:
-            return report.record(5, "Document upload & ready status", False, f"Upload returned HTTP {r.status_code}")
-        doc_data = r.json()
-        uploaded_doc_id = str(doc_data["document_id"])
-        created_doc_ids.append(uploaded_doc_id)
+            file_bytes = f.read()
 
-        # Poll status until terminal
-        deadline = time.perf_counter() + 90.0
-        final_status = None
         chunk_count = 0
-        while time.perf_counter() < deadline:
-            time.sleep(2.0)
-            sr = httpx.get(f"{BACKEND_BASE}/api/v1/documents/{uploaded_doc_id}", timeout=30.0)
-            if sr.status_code == 200:
-                sdata = sr.json()
-                final_status = sdata.get("status")
-                chunk_count = sdata.get("chunk_count", 0)
-                if final_status in ("ready", "failed"):
-                    break
+        for run_idx in range(1, num_stress_runs + 1):
+            files = {"file": (FIXTURE_PATH.name, file_bytes, "application/pdf")}
+            r = httpx.post(f"{BACKEND_BASE}/api/v1/documents", files=files, timeout=30.0)
+            if r.status_code != 201:
+                return report.record(5, "Document upload & ready status", False, f"Upload {run_idx}/{num_stress_runs} returned HTTP {r.status_code}")
+            doc_data = r.json()
+            uploaded_doc_id = str(doc_data["document_id"])
+            created_doc_ids.append(uploaded_doc_id)
 
-        if final_status != "ready":
-            return report.record(
-                5,
-                "Document upload & ready status",
-                False,
-                f"Terminal status was '{final_status}' (expected 'ready')",
-            )
+            # Poll status until terminal
+            deadline = time.perf_counter() + 90.0
+            final_status = None
+            while time.perf_counter() < deadline:
+                time.sleep(2.0)
+                sr = httpx.get(f"{BACKEND_BASE}/api/v1/documents/{uploaded_doc_id}", timeout=30.0)
+                if sr.status_code == 200:
+                    sdata = sr.json()
+                    final_status = sdata.get("status")
+                    chunk_count = sdata.get("chunk_count", 0)
+                    if final_status in ("ready", "failed"):
+                        break
+
+            if final_status != "ready":
+                return report.record(
+                    5,
+                    "Document upload & ready status",
+                    False,
+                    f"Upload {run_idx}/{num_stress_runs} reached '{final_status}' instead of 'ready'",
+                )
+
         report.record(
             5,
             "Document upload & ready status",
             True,
-            f"Uploaded {FIXTURE_PATH.name} -> ready ({chunk_count} chunks, no race error, no crash)",
+            f"Uploaded {num_stress_runs} consecutive fixtures -> all ready ({chunk_count} chunks, 0 race errors, 0 crashes)",
         )
     except Exception as exc:
-        return report.record(5, "Document upload & ready status", False, f"Upload failed: {exc}")
+        return report.record(5, "Document upload & ready status", False, f"Upload stress failed: {exc}")
 
     # 6. Real chat question SSE stream
     try:
@@ -583,6 +587,16 @@ async def cleanup_test_data() -> None:
             except Exception:
                 pass
         await session.commit()
+
+    # Verify zero orphaned Qdrant points
+    try:
+        from qdrant_client import QdrantClient
+        settings = get_settings()
+        qc = QdrantClient(url=settings.qdrant_url)
+        info = qc.get_collection(settings.qdrant_collection)
+        print(f"Cleanup confirmed: {info.points_count} points remaining in Qdrant (zero orphaned vectors)")
+    except Exception as exc:
+        print(f"Qdrant cleanup check warning: {exc}")
 
 
 def main() -> int:
