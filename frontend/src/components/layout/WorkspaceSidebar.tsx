@@ -16,6 +16,7 @@ import { WORKSPACES } from "@/stores/workspaceStore";
 import { useWorkspaceStore } from "@/stores/workspaceStore";
 import { DocumentList } from "@/components/documents/DocumentList";
 import { UploadDropzone } from "@/components/documents/UploadDropzone";
+import { isProcessing } from "@/types/document";
 
 function SectionLabel({ children }: { children: string }) {
   return (
@@ -42,6 +43,13 @@ export function WorkspaceSidebar({
 }) {
   const activeWorkspaceId = useWorkspaceStore((state) => state.activeWorkspaceId);
   const setActiveWorkspace = useWorkspaceStore((state) => state.setActiveWorkspace);
+
+  // Disable the drop zone while any document is still being ingested.
+  // The backend serialises conversion behind a single lock (no worker queue in
+  // V1), so a second concurrent upload would stall at parsing until the first
+  // finishes - surfacing that constraint explicitly is more honest than
+  // silently accepting a file the user can't predict will be delayed.
+  const ingestionActive = documents.some((d) => isProcessing(d.status));
 
   return (
     <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-surface">
@@ -87,13 +95,14 @@ export function WorkspaceSidebar({
             errorMessage={errorMessage}
             onRetry={onRetry}
             slowIds={slowIds}
+            ingestionActive={ingestionActive}
           />
         </div>
 
         {/* Section 11.5: always-available upload affordance, not just when the
             sidebar is empty. */}
         <div className="shrink-0 py-2">
-          <UploadDropzone compact />
+          <UploadDropzone compact disabled={ingestionActive} />
         </div>
       </div>
     </aside>

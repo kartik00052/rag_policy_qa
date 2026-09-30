@@ -30,6 +30,7 @@ export function DocumentList({
   errorMessage,
   onRetry,
   slowIds,
+  ingestionActive,
 }: {
   documents: DocumentSummary[];
   isLoading: boolean;
@@ -38,6 +39,8 @@ export function DocumentList({
   onRetry: () => void;
   /** Documents non-terminal for longer than the slow threshold. */
   slowIds?: Set<string>;
+  /** True while any document is actively ingesting; disables the drop zone. */
+  ingestionActive?: boolean;
 }) {
   if (isError) {
     return (
@@ -84,7 +87,7 @@ export function DocumentList({
           Upload a policy to start asking questions.
         </p>
         <div className="mt-3">
-          <UploadDropzone compact />
+          <UploadDropzone compact disabled={ingestionActive} />
         </div>
       </div>
     );

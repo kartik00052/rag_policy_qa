@@ -14,6 +14,13 @@
  *    unsupported type) leaves no document and no id, so the message is attached
  *    to the file the user dropped;
  *  - ingestion failing later surfaces as a `failed` badge on the sidebar row.
+ *
+ * `disabled` is set by the parent while any document is actively ingesting.
+ * The backend runs ingestion in-process behind a single converter lock
+ * (PROJECT.md Section 2: no worker queue in V1), so a second concurrent upload
+ * is accepted by the HTTP layer but its ingestion task blocks until the first
+ * parse finishes. Showing a clear reason is more honest than silently accepting
+ * a file that will be delayed.
  */
 
 import { useRef, useState } from "react";
@@ -21,14 +28,21 @@ import { AlertCircle, X } from "lucide-react";
 import { useUploadDocument } from "@/hooks/useUploadDocument";
 import { acceptedTypes } from "@/types/document";
 
-export function UploadDropzone({ compact = false }: { compact?: boolean }) {
+export function UploadDropzone({
+  compact = false,
+  disabled = false,
+}: {
+  compact?: boolean;
+  /** Block drops while any document is actively ingesting. */
+  disabled?: boolean;
+}) {
   const upload = useUploadDocument();
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
   const [failedFiles, setFailedFiles] = useState<string[]>([]);
 
   const handleFiles = (files: FileList | null) => {
-    if (!files?.length) return;
+    if (disabled || !files?.length) return;
     const list = Array.from(files);
     setFailedFiles([]);
     for (const file of list) {
@@ -48,6 +62,39 @@ export function UploadDropzone({ compact = false }: { compact?: boolean }) {
     setFailedFiles([]);
     upload.reset();
   };
+
+  // While any document is ingesting, show a non-interactive placeholder that
+  // explains why the drop zone is locked. The backend serialises parsing behind
+  // a single converter lock (no worker queue in V1), so a second file would
+  // block indefinitely and the UI would appear stuck with no explanation.
+  if (disabled) {
+    return (
+      <div
+        aria-disabled="true"
+        aria-label="Upload unavailable while a document is processing"
+        className={[
+          "rounded-lg border border-dashed border-border transition-colors",
+          compact ? "px-3 py-2" : "px-4 py-8 text-center",
+          "cursor-not-allowed opacity-50",
+        ].join(" ")}
+      >
+        {compact ? (
+          <span className="text-[13px] text-text-muted">
+            Processing… upload will resume shortly
+          </span>
+        ) : (
+          <>
+            <p className="text-[13px] text-text-muted">
+              Ingestion in progress
+            </p>
+            <p className="mt-1 text-[12px] leading-snug text-text-muted">
+              Upload another file once the current one finishes.
+            </p>
+          </>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-1.5">
