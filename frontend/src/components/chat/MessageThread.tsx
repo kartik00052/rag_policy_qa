@@ -8,15 +8,33 @@
  */
 
 import { useEffect, useRef } from "react";
-import { useConversationStore } from "@/stores/conversationStore";
+import { getConversation } from "@/lib/api";
+import { fromStoredMessage, useConversationStore } from "@/stores/conversationStore";
 import { MessageBubble } from "./MessageBubble";
 import { ChatInput } from "./ChatInput";
 
 export function MessageThread() {
   const messages = useConversationStore((state) => state.messages);
   const isStreaming = useConversationStore((state) => state.isStreaming);
+  const setConversationId = useConversationStore((state) => state.setConversationId);
+  const setMessages = useConversationStore((state) => state.setMessages);
   const bottomRef = useRef<HTMLDivElement>(null);
   const pinnedToBottom = useRef(true);
+
+  // Restore history on reload (Check 4 / DoD 4)
+  useEffect(() => {
+    const activeId = localStorage.getItem("rag_active_conversation_id");
+    if (activeId && useConversationStore.getState().messages.length === 0) {
+      void getConversation(activeId)
+        .then((detail) => {
+          setConversationId(detail.id);
+          setMessages(detail.messages.map(fromStoredMessage));
+        })
+        .catch(() => {
+          localStorage.removeItem("rag_active_conversation_id");
+        });
+    }
+  }, [setConversationId, setMessages]);
 
   const handleScroll = () => {
     const element = bottomRef.current?.parentElement;

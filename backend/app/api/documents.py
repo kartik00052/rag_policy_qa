@@ -73,6 +73,19 @@ async def upload_document(
         "upload accepted: %s (%s) -> %s", filename, file_type, document.id
     )
 
+    # Commit before firing the background task so the row is visible to the
+    # task's own session_scope() connection. create_document() calls
+    # session.flush() which writes the row but does NOT commit it — the
+    # request-scoped session only commits when get_session()'s __aexit__
+    # runs after the handler returns. asyncio.create_task() schedules the
+    # ingestion coroutine immediately, and it can reach its first await
+    # (opening session_scope() and querying Document.id) before the request
+    # session's implicit commit, causing 'document vanished mid-ingestion'.
+    # Explicitly committing here, before create_task, closes that window
+    # entirely: once this line returns the row is durable in the DB and
+    # visible to every connection, regardless of event-loop scheduling.
+    await session.commit()
+
     document_service.start_ingestion(document.id, stored_path)
 
     return DocumentUploadResponse(

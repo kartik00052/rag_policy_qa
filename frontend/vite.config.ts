@@ -17,9 +17,22 @@ export default defineConfig(({ mode }) => {
    * Deliberately not used in production builds: `VITE_API_URL` stays absolute
    * there, and a deployed frontend is expected to be served behind whatever
    * reverse proxy owns that origin.
+   *
+   * The proxy target is NOT simply `VITE_API_URL` with the prefix stripped. Dev
+   * config sets `VITE_API_URL=/api/v1` (relative, so the browser calls
+   * same-origin and this proxy is what resolves it). Stripping `/api/v1` from
+   * that leaves an empty string, and an empty proxy target makes every request
+   * 502 - the app then shows "can't reach the policy service" while the backend
+   * is running perfectly. So the target is only derived from `VITE_API_URL` when
+   * it is already absolute; a relative value means "proxy me", and the concrete
+   * backend origin falls back to the documented local default.
    */
-  const apiTarget = env.VITE_API_URL || "http://localhost:8000/api/v1"
-  const origin = apiTarget.replace(/\/api\/v1\/?$/, "")
+  const DEFAULT_BACKEND_ORIGIN = "http://localhost:8000"
+  const configured = env.VITE_API_URL ?? ""
+  const isAbsolute = /^https?:\/\//i.test(configured)
+  const origin = isAbsolute
+    ? configured.replace(/\/api\/v1\/?$/, "")
+    : DEFAULT_BACKEND_ORIGIN
 
   return {
     plugins: [tailwindcss()],

@@ -151,12 +151,18 @@ export async function uploadDocument(file: File): Promise<DocumentUploadResponse
 // Conversations
 // ---------------------------------------------------------------------------
 
+interface ConversationListResponse {
+  conversations: ConversationSummary[];
+  total: number;
+}
+
 export async function listConversations(): Promise<ConversationSummary[]> {
   if (MOCK_ENABLED) {
     const { MOCK_CONVERSATIONS } = await import("./mock/fixtures");
     return MOCK_CONVERSATIONS.map((conversation) => ({ ...conversation }));
   }
-  return request<ConversationSummary[]>("/conversations");
+  const body = await request<ConversationListResponse>("/conversations");
+  return body.conversations ?? [];
 }
 
 export async function getConversation(

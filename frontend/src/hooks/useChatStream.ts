@@ -16,7 +16,7 @@
  */
 
 import { useCallback, useRef } from "react";
-import { ApiError, streamChat } from "@/lib/api";
+import { ApiError, listConversations, streamChat } from "@/lib/api";
 import { useConversationStore } from "@/stores/conversationStore";
 
 let counter = 0;
@@ -27,6 +27,7 @@ function nextId(prefix: string): string {
 
 export function useChatStream() {
   const conversationId = useConversationStore((state) => state.conversationId);
+  const setConversationId = useConversationStore((state) => state.setConversationId);
   const addMessage = useConversationStore((state) => state.addMessage);
   const beginStreaming = useConversationStore((state) => state.beginStreaming);
   const appendToken = useConversationStore((state) => state.appendToken);
@@ -73,7 +74,6 @@ export function useChatStream() {
         },
       );
       activeHandle.current = handle;
-
       try {
         const final = await handle.done;
         finalizeMessage(
@@ -82,6 +82,16 @@ export function useChatStream() {
           final.citations,
           final.has_sufficient_evidence,
         );
+        try {
+          const list = await listConversations();
+          if (list.length > 0) {
+            const latestId = list[0].id;
+            setConversationId(latestId);
+            localStorage.setItem("rag_active_conversation_id", latestId);
+          }
+        } catch {
+          // Background sync
+        }
       } catch (cause) {
         if (cause instanceof ApiError && cause.detail === "Request cancelled.") {
           return;
