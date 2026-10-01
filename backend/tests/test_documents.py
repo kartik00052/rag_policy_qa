@@ -228,3 +228,50 @@ async def test_get_document_page_raises_on_missing_page(
         await get_document_page(mock_session, doc_id, 2)
 
 
+def test_resolve_file_type_supports_spreadsheets() -> None:
+    assert resolve_file_type("sheet.xlsx") == "xlsx"
+    assert resolve_file_type("SHEET.XLSX") == "xlsx"
+    assert resolve_file_type("allowances.csv") == "csv"
+    assert resolve_file_type("ALLOWANCES.CSV") == "csv"
+
+
+def test_spreadsheet_fixtures_parse_and_chunk_tables() -> None:
+    from pathlib import Path
+    from app.ingestion.parser import _convert_blocking, extract_document_pages
+    from app.ingestion.chunker import chunk_document
+
+    fixtures_dir = Path(__file__).resolve().parent.parent / "scripts" / "fixtures"
+    csv_file = fixtures_dir / "sample_policy_allowances.csv"
+    xlsx_file = fixtures_dir / "sample_policy_accommodations.xlsx"
+
+    assert csv_file.exists(), f"Fixture {csv_file} missing"
+    assert xlsx_file.exists(), f"Fixture {xlsx_file} missing"
+
+    # CSV
+    doc_csv = _convert_blocking(csv_file, ".csv")
+    chunks_csv = chunk_document(doc_csv)
+    pages_csv = extract_document_pages(doc_csv)
+
+    assert len(chunks_csv) >= 1
+    assert chunks_csv[0].content_type == "table"
+    assert "|" in chunks_csv[0].content
+    assert "Daily allowance" in chunks_csv[0].content
+    assert len(pages_csv) >= 1
+    assert "1" in pages_csv
+    assert pages_csv["1"]["page_number"] == 1
+
+    # XLSX
+    doc_xlsx = _convert_blocking(xlsx_file, ".xlsx")
+    chunks_xlsx = chunk_document(doc_xlsx)
+    pages_xlsx = extract_document_pages(doc_xlsx)
+
+    assert len(chunks_xlsx) >= 1
+    assert chunks_xlsx[0].content_type == "table"
+    assert "|" in chunks_xlsx[0].content
+    assert "Nightly cap" in chunks_xlsx[0].content
+    assert len(pages_xlsx) >= 1
+    assert "1" in pages_xlsx
+    assert pages_xlsx["1"]["page_number"] == 1
+
+
+
