@@ -7,8 +7,10 @@ Route handlers call these; they contain no FastAPI concerns
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 from fastapi import UploadFile
 from sqlalchemy import func, select, update
@@ -24,9 +26,22 @@ from app.core.logging import get_logger
 from app.db.models import Document, DocumentChunk
 from app.db.session import session_scope
 from app.ingestion.pipeline import ingest_document
+from app.schemas.documents import DocumentPageResponse
 from app.services.chunk_purge import purge_document_chunks
 
 logger = get_logger(__name__)
+
+class DocumentNotFoundError(Exception):
+    """Raised when a requested document ID does not exist."""
+
+
+class PageNotFoundError(Exception):
+    """Raised when a requested page number is not present in the document."""
+
+
+class DocumentNotReadyError(Exception):
+    """Raised when a page is requested for a document still processing or failed."""
+
 
 #: Ingestion runs inline in a background task (PROJECT.md Section 2: no Celery /
 #: worker queue in V1), so the upload response can return immediately and the
@@ -141,6 +156,8 @@ async def reconcile_interrupted_documents() -> int:
         # Vectors first, so the document is never left observably failed while
         # its chunks are still retrievable.
         await purge_document_chunks(document_id)
+        cache_file = storage_root() / f"{document_id}.pages.json"
+        cache_file.unlink(missing_ok=True)
 
     if interrupted:
         async with session_scope() as session:
@@ -175,3 +192,63 @@ async def get_document(
     )
     row = (await session.execute(stmt)).one_or_none()
     return (row[0], row[1]) if row else None
+
+
+async def get_document_page(
+    session: AsyncSession, document_id: uuid.UUID, page_number: int
+) -> DocumentPageResponse:
+    """Retrieve page text + bounding boxes (PROJECT.md Section 6)."""
+    document = await session.scalar(select(Document).where(Document.id == document_id))
+    if document is None:
+        raise DocumentNotFoundError(f"document {document_id} not found")
+
+    if document.status == DocumentStatus.FAILED.value:
+        raise DocumentNotReadyError(f"document {document_id} failed ingestion")
+
+    cache_file = storage_root() / f"{document_id}.pages.json"
+    pages_data: dict[str, Any] | None = None
+
+    if cache_file.exists():
+        try:
+            content = await asyncio.to_thread(cache_file.read_text, encoding="utf-8")
+            pages_data = json.loads(content)
+        except Exception:
+            logger.exception("could not read pages cache for %s", document_id)
+            pages_data = None
+
+    if pages_data is None:
+        if document.status != DocumentStatus.READY.value:
+            raise DocumentNotReadyError(
+                f"document {document_id} is still {document.status}"
+            )
+        # On-demand parse fallback (e.g. documents ingested prior to caching)
+        from app.ingestion.parser import extract_document_pages, parse_document
+
+        raw_path = Path(document.storage_path)
+        if not raw_path.exists():
+            raise DocumentNotFoundError(
+                f"storage file for document {document_id} missing"
+            )
+        parsed = await parse_document(raw_path)
+        pages_data = extract_document_pages(parsed)
+        try:
+            await asyncio.to_thread(
+                cache_file.write_text, json.dumps(pages_data), encoding="utf-8"
+            )
+        except Exception:
+            logger.exception("could not write pages cache for %s", document_id)
+
+    key = str(page_number)
+    if key not in pages_data:
+        raise PageNotFoundError(
+            f"page {page_number} not found for document {document_id}"
+        )
+
+    page_info = pages_data[key]
+    return DocumentPageResponse(
+        document_id=document_id,
+        page_number=page_number,
+        text=page_info.get("text", ""),
+        elements=page_info.get("elements", []),
+    )
+

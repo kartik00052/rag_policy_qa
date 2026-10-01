@@ -75,3 +75,27 @@ class DocumentDetail(DocumentSummary):
 
 class DocumentErrorResponse(BaseModel):
     detail: str
+
+
+class BoundingBox(BaseModel):
+    l: float
+    t: float
+    r: float
+    b: float
+    coord_origin: str = "BOTTOMLEFT"
+
+
+class PageElement(BaseModel):
+    text: str
+    label: str
+    bbox: BoundingBox | None = None
+
+
+class DocumentPageResponse(BaseModel):
+    """PROJECT.md Section 6: page text + bounding boxes for highlight."""
+
+    document_id: uuid.UUID
+    page_number: int
+    text: str
+    elements: list[PageElement] = Field(default_factory=list)
+

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 from docling.datamodel.base_models import InputFormat
 from docling.document_converter import DocumentConverter
@@ -67,3 +68,61 @@ async def parse_document(path: Path) -> DoclingDocument:
 
     async with _convert_lock:
         return await asyncio.to_thread(_convert_blocking, path, suffix)
+
+
+def extract_document_pages(document: DoclingDocument) -> dict[str, Any]:
+    """Extract page text and bounding boxes for the evidence viewer (PROJECT.md Section 6)."""
+    pages: dict[int, dict[str, Any]] = {}
+
+    for item, _ in document.iterate_items():
+        prov = getattr(item, "prov", None)
+        p = (
+            prov[0].page_no
+            if prov and len(prov) > 0 and getattr(prov[0], "page_no", None)
+            else 1
+        )
+
+        txt = getattr(item, "text", "") or ""
+        label = getattr(item, "label", None)
+        label_str = str(label.value) if hasattr(label, "value") else str(label or "")
+
+        if not txt and "table" in label_str:
+            try:
+                txt = item.export_to_markdown(doc=document)
+            except Exception:
+                txt = ""
+
+        if not txt.strip():
+            continue
+
+        bbox_dict = None
+        if prov and len(prov) > 0 and getattr(prov[0], "bbox", None):
+            b = prov[0].bbox
+            try:
+                bbox_dict = {
+                    "l": round(float(b.l), 2),
+                    "t": round(float(b.t), 2),
+                    "r": round(float(b.r), 2),
+                    "b": round(float(b.b), 2),
+                    "coord_origin": str(getattr(b, "coord_origin", "BOTTOMLEFT")),
+                }
+            except Exception:
+                bbox_dict = None
+
+        if p not in pages:
+            pages[p] = {"page_number": p, "text": "", "elements": []}
+
+        pages[p]["elements"].append({
+            "text": txt.strip(),
+            "label": label_str,
+            "bbox": bbox_dict,
+        })
+
+    if not pages:
+        pages[1] = {"page_number": 1, "text": "", "elements": []}
+
+    for p, data in pages.items():
+        data["text"] = "\n\n".join(el["text"] for el in data["elements"])
+
+    return {str(p): data for p, data in sorted(pages.items())}
+

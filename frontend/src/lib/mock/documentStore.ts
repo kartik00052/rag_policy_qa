@@ -20,7 +20,12 @@
  * ordering and the per-stage dwell time are genuine.
  */
 
-import type { DocumentDetail, DocumentStatus, DocumentSummary } from "@/types/document";
+import type {
+  DocumentDetail,
+  DocumentPageResponse,
+  DocumentStatus,
+  DocumentSummary,
+} from "@/types/document";
 import { MOCK_DOCUMENTS, MOCK_DOCUMENT_DETAIL } from "./fixtures";
 
 /** How long a freshly uploaded document sits in each stage. */
@@ -165,3 +170,20 @@ export function mockGet(documentId: string): DocumentDetail | null {
 export function mockDefaultDetail(): DocumentDetail {
   return { ...MOCK_DOCUMENT_DETAIL };
 }
+
+export function mockGetPage(documentId: string, page: number): DocumentPageResponse {
+  return {
+    document_id: documentId,
+    page_number: page,
+    text:
+      "1. Purpose and Scope\n\nThis policy governs business travel, leave entitlements and expense reimbursement for all Acme Global employees. It applies to full-time and part-time staff on permanent contracts.\n\n4. Travel Approval\n\nTravel requests must be submitted at least 5 working days before departure and require manager approval before booking.\n\n6.2 Reimbursement Limits\n\nMeals and incidental expenses during travel are reimbursed at a flat daily allowance of 75 USD for domestic travel and 100 USD for international travel. Itemised meal receipts are not required.\n\nExpense claims must be submitted within 30 days of completing the trip. Claims submitted after this period are only reimbursed at the discretion of the Head of Finance.",
+    elements: [
+      {
+        text: "1. Purpose and Scope",
+        label: "section_header",
+        bbox: { l: 56.0, t: 760.0, r: 250.0, b: 780.0, coord_origin: "BOTTOMLEFT" },
+      },
+    ],
+  };
+}
+

@@ -19,6 +19,7 @@ from app.schemas.documents import (
     DocumentDetail,
     DocumentErrorResponse,
     DocumentListResponse,
+    DocumentPageResponse,
     DocumentSummary,
     DocumentUploadResponse,
 )
@@ -137,3 +138,34 @@ async def get_document(
         created_at=document.created_at,
         chunk_count=count,
     )
+
+
+@router.get(
+    "/{document_id}/pages/{page}",
+    response_model=DocumentPageResponse,
+    responses={
+        404: {"model": DocumentErrorResponse},
+        409: {"model": DocumentErrorResponse},
+    },
+    summary="Get document page text and bounding boxes",
+)
+async def get_document_page(
+    document_id: uuid.UUID = PathParam(..., description="Document UUID"),
+    page: int = PathParam(..., ge=1, description="1-based page number"),
+    session: AsyncSession = Depends(get_session),
+) -> DocumentPageResponse:
+    try:
+        return await document_service.get_document_page(session, document_id, page)
+    except document_service.DocumentNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except document_service.PageNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except document_service.DocumentNotReadyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+

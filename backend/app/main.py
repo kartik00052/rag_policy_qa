@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api import chat, debug, documents, health
 from app.core.config import get_settings
@@ -52,6 +53,27 @@ def create_app() -> FastAPI:
         ),
         lifespan=lifespan,
     )
+
+    # The Vite dev server runs on its own origin (5173) from the API (8000), so
+    # every fetch and every EventSource is cross-origin. Without this the browser
+    # blocks the response and the frontend fails with a CORS error that looks
+    # like a backend outage. Origins are listed explicitly rather than using "*"
+    # because allow_credentials=True is not compatible with a wildcard origin.
+    # Production frontend requests go through the Vite reverse proxy or same
+    # origin, so this list is dev-oriented by design.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:3000",
+        ],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     app.include_router(health.router)
     app.include_router(documents.router)
     app.include_router(chat.router)

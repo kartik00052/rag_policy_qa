@@ -8,11 +8,11 @@ export default defineConfig(({ mode }) => {
   /*
    * Dev-only proxy to the backend.
    *
-   * The backend serves no CORS headers at all - it registers no CORS
-   * middleware - so a browser on :5173 cannot call :8000 directly. Every real
-   * request fails the preflight with "No 'Access-Control-Allow-Origin' header",
-   * which surfaces to the user as an opaque "Failed to fetch" rather than as a
-   * diagnosable error. Proxying in dev keeps the browser same-origin.
+   * The backend now registers CORS middleware for the dev origins
+   * (backend/app/main.py), so a browser on :5173 *can* call :8000 directly when
+   * VITE_API_URL is absolute. The proxy is kept because it makes the browser
+   * same-origin in dev, which avoids the CORS preflight round-trip on every
+   * request and matches how the app is served in production.
    *
    * Deliberately not used in production builds: `VITE_API_URL` stays absolute
    * there, and a deployed frontend is expected to be served behind whatever

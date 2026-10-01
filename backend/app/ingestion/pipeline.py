@@ -15,6 +15,7 @@ citation-trust promise in PROJECT.md Section 1.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from pathlib import Path
@@ -22,12 +23,12 @@ from pathlib import Path
 from qdrant_client.http.models import PointStruct
 from sqlalchemy import select
 
-from app.core.config import DocumentStatus
+from app.core.config import DocumentStatus, get_settings
 from app.core.logging import get_logger
 from app.db.models import Document, DocumentChunk
 from app.db.session import session_scope
 from app.ingestion.chunker import chunk_document
-from app.ingestion.parser import parse_document
+from app.ingestion.parser import extract_document_pages, parse_document
 from app.services import bm25
 from app.services.chunk_purge import purge_document_chunks
 from app.services.corpus_stats import corpus_stats
@@ -79,6 +80,8 @@ async def _purge_then_mark_failed(document_id: uuid.UUID, reason: str) -> None:
     # reconciliation is the backstop for any vectors this leaves behind.
     try:
         await purge_document_chunks(document_id)
+        cache_file = get_settings().storage_dir / f"{document_id}.pages.json"
+        cache_file.unlink(missing_ok=True)
     except Exception:  # noqa: BLE001 - already failing; keep the original cause
         logger.exception("could not purge partial chunks for %s", document_id)
     await set_status(document_id, DocumentStatus.FAILED)
@@ -113,6 +116,14 @@ async def ingest_document(document_id: uuid.UUID, path: Path) -> int:
         stage = time.perf_counter()
         parsed = await parse_document(path)
         logger.info("document %s: parsed in %.2fs", document_id, time.perf_counter() - stage)
+
+        # Cache page text + bounding boxes for sub-10ms evidence viewer response (PROJECT.md Section 6).
+        try:
+            pages_data = extract_document_pages(parsed)
+            cache_file = get_settings().storage_dir / f"{document_id}.pages.json"
+            await asyncio.to_thread(cache_file.write_text, json.dumps(pages_data), encoding="utf-8")
+        except Exception:
+            logger.exception("document %s: could not cache pages JSON", document_id)
 
         await set_status(document_id, DocumentStatus.CHUNKING)
         stage = time.perf_counter()

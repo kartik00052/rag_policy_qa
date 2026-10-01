@@ -19,6 +19,7 @@ import type {
 } from "@/types/chat";
 import type {
   DocumentDetail,
+  DocumentPageResponse,
   DocumentSummary,
   DocumentUploadResponse,
 } from "@/types/document";
@@ -125,6 +126,18 @@ export async function getDocument(documentId: string): Promise<DocumentDetail> {
   }
   return request<DocumentDetail>(`/documents/${documentId}`);
 }
+
+export async function getDocumentPage(
+  documentId: string,
+  page: number,
+): Promise<DocumentPageResponse> {
+  if (MOCK_ENABLED) {
+    const { mockGetPage } = await import("./mock/documentStore");
+    return mockGetPage(documentId, page);
+  }
+  return request<DocumentPageResponse>(`/documents/${documentId}/pages/${page}`);
+}
+
 
 export async function uploadDocument(file: File): Promise<DocumentUploadResponse> {
   if (MOCK_ENABLED) {

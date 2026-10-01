@@ -105,3 +105,25 @@ export function acceptedTypes(): string {
           : "application/pdf",
   ).join(",");
 }
+
+export interface BoundingBox {
+  l: number;
+  t: number;
+  r: number;
+  b: number;
+  coord_origin: string;
+}
+
+export interface PageElement {
+  text: string;
+  label: string;
+  bbox?: BoundingBox | null;
+}
+
+export interface DocumentPageResponse {
+  document_id: string;
+  page_number: number;
+  text: string;
+  elements: PageElement[];
+}
+
