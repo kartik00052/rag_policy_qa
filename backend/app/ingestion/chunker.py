@@ -29,6 +29,10 @@ MIN_CHARS: Final[int] = 40
 #: A single line this short is treated as a table caption rather than prose.
 MAX_CAPTION_CHARS: Final[int] = 120
 
+_TABLE_CAPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(Table\s+[\w\.\-]+(?:\s*:\s*|\s+)[^\n]+?)(?=(?:Table\s+[\w\.\-]+|$))",
+    re.IGNORECASE,
+)
 _OUTLINE_RE: Final[re.Pattern[str]] = re.compile(r"^(\d+(?:\.\d+)*)\.?\s")
 _WS_RE: Final[re.Pattern[str]] = re.compile(r"\s+")
 _HEADING_LABELS: Final[frozenset[str]] = frozenset({"section_header", "title"})
@@ -167,6 +171,8 @@ def chunk_document(document: DoclingDocument) -> list[Chunk]:
                 )
             )
 
+    table_captions_queue: list[str] = []
+
     def flush() -> None:
         emit_text(buffer.take(), buffer.page_number)
 
@@ -179,6 +185,7 @@ def chunk_document(document: DoclingDocument) -> list[Chunk]:
             if not text:
                 continue
             flush()
+            table_captions_queue.clear()
             dedupe_against = None
             depth = _depth_of(text, level)
             while heading_stack and heading_stack[-1][0] >= depth:
@@ -193,18 +200,47 @@ def chunk_document(document: DoclingDocument) -> list[Chunk]:
             markdown = _table_markdown(item, document)
             if not markdown:
                 continue
-            # Only a short single-line label is a caption. Anything longer is the
-            # section's own prose and stays its own chunk, so prose is never
-            # absorbed into a table chunk.
-            pending = buffer.take()
+
             caption = ""
+            if hasattr(item, "caption_text"):
+                try:
+                    caption = (item.caption_text(document) or "").strip()
+                except Exception:
+                    caption = ""
+
+            pending = buffer.take()
             if pending:
-                if len(pending) <= MAX_CAPTION_CHARS and "\n\n" not in pending:
-                    caption = pending
+                found_captions = [
+                    c.strip()
+                    for c in _TABLE_CAPTION_RE.findall(pending)
+                    if c.strip()
+                ]
+                if found_captions:
+                    table_captions_queue.extend(found_captions)
+                    prose = _TABLE_CAPTION_RE.sub("", pending).strip()
+                    if prose:
+                        emit_text(prose, buffer.page_number, force=True)
+                elif len(pending) <= MAX_CAPTION_CHARS and "\n\n" not in pending:
+                    if not caption:
+                        caption = pending
                 else:
                     emit_text(pending, buffer.page_number, force=True)
 
-            content = f"{caption}\n\n{markdown}" if caption else markdown
+            if not caption and table_captions_queue:
+                caption = table_captions_queue.pop(0)
+
+            if caption and markdown.lstrip().startswith(caption):
+                caption = ""
+
+            parts: list[str] = []
+            curr_section = section()
+            if curr_section:
+                parts.append(f"### {curr_section}")
+            if caption:
+                parts.append(caption)
+            parts.append(markdown)
+            content = "\n\n".join(parts)
+
             chunks.append(
                 Chunk(
                     chunk_index=len(chunks),

@@ -412,3 +412,17 @@ def test_a_decimal_does_not_split_a_sentence() -> None:
     claims = claims_of("Accrual is 1.75 days per month [1].")
     assert len(claims) == 1
     assert claims[0].positions == (1,)
+
+
+def test_marker_variations_and_block_capitalization() -> None:
+    # BE-01: varied marker formats emitted by LLMs
+    assert cited_positions("See Block [2] for details.") == [2]
+    assert cited_positions("As described in block 2.") == [2]
+    assert cited_positions("Claims under [1-3] apply.") == [1, 2, 3]
+
+    # Capitalized "Block [2]" does not become a phantom claim that drops real claim
+    claims = claims_of("The daily meal allowance for an international trip is 100 USD. Block [2]")
+    assert len(claims) == 1
+    assert claims[0].positions == (2,)
+    assert "100 USD" in claims[0].text
+

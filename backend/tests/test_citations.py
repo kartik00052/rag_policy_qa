@@ -162,3 +162,24 @@ def test_a_load_bearing_connective_is_never_removed() -> None:
         == "Leave is 25 days per year."
     )
     assert strip_markers("The cost is 100 USD [1].") == "The cost is 100 USD."
+
+
+def test_capitalized_and_sentence_initial_connectives_are_cleanly_removed() -> None:
+    # BE-11: Capitalized connective at sentence start or after comma
+    assert (
+        strip_markers("According to [1], economy class must be booked.")
+        == "Economy class must be booked."
+    )
+    assert (
+        strip_markers("No, According to [1], economy class must be booked.")
+        == "No, economy class must be booked."
+    )
+    assert (
+        strip_markers("Based on [1], economy class must be booked.")
+        == "Economy class must be booked."
+    )
+    assert (
+        strip_markers("According to [1] economy class must be booked.")
+        == "Economy class must be booked."
+    )
+

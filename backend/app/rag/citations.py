@@ -278,26 +278,21 @@ _CONNECTOR_WORDS = frozenset(
 _DANGLING_LEAD = (
     r"(?:"
     r"according\s+to"
+    r"|based\s+on"
     r"|as\s+(?:per|stated|described|listed|shown|documented|defined|specified)"
     r"(?:\s+in|\s+by)?"
     r"|(?:per|under|with|from|by|in|on|at|of|to|as)"
     r")\b[\s:]*"
 )
 
-#: A connective, a marker, and the comma that closed the parenthetical, all of
-#: which are removed together. Observed verbatim from the contradiction-retry
-#: path: "No, according to [1], economy class must be booked for all flights
-#: under 6 hours." Removing the marker alone left "No, according to, economy
-#: class must be booked", which reads as a truncation.
-#:
-#: The trailing comma is what makes this safe and is why it is not simply
-#: "strip a dangling connective". The comma proves the marker was parenthetical
-#: - inserted into the clause and set off by punctuation, rather than carrying
-#: the sentence's own syntax. Without that evidence the connective is load
-#: bearing: "The cap is described in [2]." needs its "in" until
-#: :func:`_drop_dangling_connectors` decides the whole sentence was an aside, and
-#: "Leave is 25 days per year [1]." has no comma to key off at all.
-_PARENTHETICAL = re.compile(_DANGLING_LEAD + _MARKER.pattern + r"\s*,")
+_PARENTHETICAL = re.compile(_DANGLING_LEAD + _MARKER.pattern + r"\s*[,;:]\s*", re.IGNORECASE)
+
+_SENTENCE_INITIAL = re.compile(
+    r"(?:^|(?<=[.!?]\s))\s*(?:according\s+to|based\s+on|as\s+per)\s+"
+    + _MARKER.pattern
+    + r"\s*[,;:]?\s*",
+    re.IGNORECASE,
+)
 
 _SENTENCE_TAIL = re.compile(r"([^.!?]*)([.!?])")
 
@@ -351,7 +346,8 @@ answer: str) -> str:
     """
     if not answer:
         return ""
-    cleaned = _PARENTHETICAL.sub("", answer)
+    cleaned = _SENTENCE_INITIAL.sub("", answer)
+    cleaned = _PARENTHETICAL.sub("", cleaned)
     cleaned = _MARKER.sub("", cleaned)
     cleaned = _EMPTY_GROUP.sub("", cleaned)
     # Collapse the runs of spaces left behind, but keep paragraph breaks intact.
@@ -360,4 +356,5 @@ answer: str) -> str:
     cleaned = _drop_dangling_connectors(cleaned)
     # The connector removal can leave a space before the sentence's punctuation.
     cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"(^[a-z]|(?<=[.!?]\s)[a-z])", lambda m: m.group(0).upper(), cleaned.strip())
     return cleaned.strip()

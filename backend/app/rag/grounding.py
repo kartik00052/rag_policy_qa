@@ -67,21 +67,34 @@ logger = get_logger(__name__)
 #: leaving "in block ," behind.
 MARKER = re.compile(
     r"(?:\b(?:block|blocks|source|sources|see)\b[\s:]*)?"
-    r"\[(\d{1,3}(?:\s*,\s*\d{1,3})*)\]"
+    r"(?:\[(?P<nums>\d{1,3}(?:(?:\s*,\s*|\s*-\s*)\d{1,3})*)\]"
+    r"|\b(?:block|blocks|source|sources)\s+(?P<single>\d{1,3})\b)",
+    re.IGNORECASE,
 )
 
 
 def cited_positions(answer: str) -> list[int]:
     """Every block number the answer points at, in order, duplicates kept.
 
-    One marker may carry several numbers ("[1, 3]"); they are flattened here so
-    that callers resolving markers do not each re-implement the comma split.
+    One marker may carry several numbers ("[1, 3]" or "[1-3]"); they are
+    flattened here so that callers resolving markers do not each re-implement
+    the comma/hyphen split.
     """
     positions: list[int] = []
-    for group in MARKER.findall(answer or ""):
-        for part in group.split(","):
-            if part.strip():
-                positions.append(int(part))
+    for m in MARKER.finditer(answer or ""):
+        nums = m.group("nums")
+        if nums:
+            if "-" in nums:
+                parts = [p.strip() for p in nums.split("-") if p.strip()]
+                if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+                    start, end = int(parts[0]), int(parts[1])
+                    positions.extend(range(start, end + 1))
+            else:
+                for part in nums.split(","):
+                    if part.strip() and part.strip().isdigit():
+                        positions.append(int(part.strip()))
+        elif m.group("single"):
+            positions.append(int(m.group("single")))
     return positions
 
 
@@ -337,13 +350,32 @@ def attribute_claims(
                 # too lexically distant; the claim keeps the model's choice.
                 best_position = named
             else:
-                logger.warning(
-                    "no block at or above the evidence threshold %.3f carries "
-                    "the claim %r; leaving it uncited",
-                    threshold,
-                    claim.text[:120],
+                # Fallback: if the named block was below threshold or out of range,
+                # check qualifying blocks above threshold for positive content coverage.
+                candidates = [
+                    (coverage(body, chunk.chunk.content), pos)
+                    for pos, chunk in enumerate(chunks, start=1)
+                    if chunk.score >= threshold
+                ]
+                best_cov, best_pos = max(
+                    candidates, key=lambda x: x[0], default=(0.0, 0)
                 )
-                continue
+                if best_cov >= 0.2:
+                    best_position = best_pos
+                    logger.info(
+                        "attributed claim %r to qualifying block [%d] (coverage %.2f)",
+                        claim.text[:80],
+                        best_position,
+                        best_cov,
+                    )
+                else:
+                    logger.warning(
+                        "no block at or above the evidence threshold %.3f carries "
+                        "the claim %r; leaving it uncited",
+                        threshold,
+                        claim.text[:120],
+                    )
+                    continue
 
         if best_position != named and named is not None:
             logger.info(
