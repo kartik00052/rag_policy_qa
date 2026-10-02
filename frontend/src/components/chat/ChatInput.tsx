@@ -11,14 +11,14 @@
  */
 
 import { useState } from "react";
-import { ArrowUp } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { useConversationStore } from "@/stores/conversationStore";
 import { useChatStream } from "@/hooks/useChatStream";
 
 export function ChatInput() {
   const [draft, setDraft] = useState("");
   const isStreaming = useConversationStore((state) => state.isStreaming);
-  const { send } = useChatStream();
+  const { send, cancel } = useChatStream();
 
   const canSend = draft.trim().length > 0 && !isStreaming;
 
@@ -35,6 +35,11 @@ export function ChatInput() {
         value={draft}
         onChange={(event) => setDraft(event.target.value)}
         onKeyDown={(event) => {
+          if (event.key === "Escape" && isStreaming) {
+            event.preventDefault();
+            cancel();
+            return;
+          }
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             submit();
@@ -49,15 +54,27 @@ export function ChatInput() {
         className="max-h-40 w-full resize-none bg-transparent px-3 py-2 text-[14px] text-text-primary outline-none placeholder:text-text-muted disabled:opacity-60"
       />
       <div className="flex items-center justify-end px-2 pb-2">
-        <button
-          type="button"
-          onClick={submit}
-          disabled={!canSend}
-          aria-label="Send question"
-          className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-bg transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-border disabled:text-text-muted"
-        >
-          <ArrowUp size={14} strokeWidth={2.25} />
-        </button>
+        {isStreaming ? (
+          <button
+            type="button"
+            onClick={cancel}
+            aria-label="Stop generating"
+            title="Stop generating"
+            className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-bg transition-colors hover:bg-accent-hover"
+          >
+            <Square size={12} fill="currentColor" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={submit}
+            disabled={!canSend}
+            aria-label="Send question"
+            className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-bg transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-border disabled:text-text-muted"
+          >
+            <ArrowUp size={14} strokeWidth={2.25} />
+          </button>
+        )}
       </div>
     </div>
   );

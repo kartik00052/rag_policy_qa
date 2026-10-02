@@ -167,3 +167,8 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       error: null,
     }),
 }));
+
+if (typeof window !== "undefined") {
+  (window as unknown as { __conversationStore: typeof useConversationStore }).__conversationStore =
+    useConversationStore;
+}

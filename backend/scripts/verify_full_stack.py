@@ -352,9 +352,11 @@ def check_layer2_backend_api() -> bool:
     except Exception as exc:
         return report.record(6, "Chat SSE stream shape", False, f"Chat stream failed: {exc}")
 
-    # 7. Insufficient-evidence question (nightly accommodation cap in New York)
+    # 7. Insufficient-evidence question (pet travel / bringing animals to the office)
+    # Note: New York accommodation cap is documented in the Acme travel policy
+    # (Band A = 1500 USD), so an actual unevidenced query is required to test gate closure.
     try:
-        neg_query = "What is the nightly accommodation cap in New York?"
+        neg_query = "What is the company policy on pet travel and bringing animals to the office?"
         token_count = 0
         done_payload = None
         with httpx.stream(
@@ -496,7 +498,28 @@ def check_layer4_e2e_playwright() -> bool:
             page.wait_for_selector("button[title*='acme_travel_policy']", timeout=120000)
             citation_chip = page.locator("button[title*='acme_travel_policy']").first
 
-            # 11.3 Click citation chip and verify Evidence panel opens
+            # 11.3 Post-answer UI state assertions (verify no stuck streaming artifacts)
+            page.wait_for_selector("textarea[aria-label='Ask a question']:not([disabled])", timeout=15000)
+            if chat_input.is_disabled():
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "Chat input remained disabled after stream completed")
+
+            placeholder_after = chat_input.get_attribute("placeholder") or ""
+            if "Answering" in placeholder_after:
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Chat input placeholder did not revert: '{placeholder_after}'")
+
+            caret_count = page.evaluate("() => document.querySelectorAll('[data-testid=\"streaming-caret\"]').length")
+            if caret_count > 0:
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Streaming caret still present in DOM after answer completed (found {caret_count})")
+
+            is_streaming_store = page.evaluate("() => window.__conversationStore ? window.__conversationStore.getState().isStreaming : false")
+            if is_streaming_store:
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "conversationStore.isStreaming is still true after completion")
+
+            # 11.4 Click citation chip and verify Evidence panel opens
             citation_chip.click()
             page.wait_for_selector("aside[aria-label='Evidence']", timeout=20000)
             evidence_panel = page.locator("aside[aria-label='Evidence']")
@@ -505,17 +528,47 @@ def check_layer4_e2e_playwright() -> bool:
                 browser.close()
                 return report.record(11, "End-to-end user flow (DoD 1-4)", False, "Evidence panel mark element is empty")
 
-            # 11.4 Reload page and confirm history restores
+            # 11.5 Reload page and confirm history restores
             page.wait_for_timeout(1000)
             page.reload()
             page.wait_for_load_state("networkidle")
             page.wait_for_selector("text=How long do I have to submit an expense claim", timeout=20000)
 
+            # 11.6 Stream cancellation regression test (P0-A regression test)
+            chat_input = page.locator("textarea[aria-label='Ask a question']")
+            chat_input.fill("What is the meal allowance per day on business trips?")
+            send_btn = page.locator("button[aria-label='Send question']")
+            send_btn.click()
+
+            # Wait for active streaming state (stop button appears and input disables)
+            page.wait_for_selector("button[aria-label='Stop generating']", timeout=5000)
+            stop_btn = page.locator("button[aria-label='Stop generating']")
+            stop_btn.click()
+
+            # Assert UI recovers immediately and cleanly from cancellation
+            page.wait_for_selector("textarea[aria-label='Ask a question']:not([disabled])", timeout=5000)
+            cancelled_placeholder = chat_input.get_attribute("placeholder") or ""
+            if "Answering" in cancelled_placeholder:
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Input placeholder did not revert on cancel: '{cancelled_placeholder}'")
+
+            cancelled_carets = page.evaluate("() => document.querySelectorAll('[data-testid=\"streaming-caret\"]').length")
+            if cancelled_carets > 0:
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Streaming caret stuck after cancel (found {cancelled_carets})")
+
+            cancelled_store_streaming = page.evaluate("() => window.__conversationStore ? window.__conversationStore.getState().isStreaming : false")
+            if cancelled_store_streaming:
+                browser.close()
+                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "conversationStore.isStreaming remained true after cancel")
+
+            page.wait_for_selector("text=Generation cancelled", timeout=5000)
+
             report.record(
                 11,
                 "End-to-end user flow (DoD 1-4)",
                 True,
-                f"Document ready -> answer streamed -> chip clicked -> Evidence mark: '{mark_text[:30]}...' -> history restored on reload",
+                f"Document ready -> answer streamed -> post-UI clean -> chip clicked -> Evidence mark: '{mark_text[:20]}...' -> history restored -> cancellation recovered cleanly",
             )
 
             # 12. Theme toggle & palette verification (Section 10)
@@ -574,13 +627,18 @@ def check_layer4_e2e_playwright() -> bool:
     return True
 
 
-async def cleanup_test_data() -> None:
+async def cleanup_test_data(preserve_one_fixture: bool = True) -> None:
     from app.services.chunk_purge import purge_document_chunks
     from app.db.session import session_scope
     from sqlalchemy import text
 
+    to_purge = list(created_doc_ids)
+    retained_id = None
+    if preserve_one_fixture and len(to_purge) >= 1:
+        retained_id = to_purge.pop()
+
     async with session_scope() as session:
-        for did in created_doc_ids:
+        for did in to_purge:
             try:
                 await purge_document_chunks(uuid.UUID(did))
                 await session.execute(text(f"DELETE FROM documents WHERE id = '{did}'"))
@@ -594,7 +652,10 @@ async def cleanup_test_data() -> None:
         settings = get_settings()
         qc = QdrantClient(url=settings.qdrant_url)
         info = qc.get_collection(settings.qdrant_collection)
-        print(f"Cleanup confirmed: {info.points_count} points remaining in Qdrant (zero orphaned vectors)")
+        if retained_id:
+            print(f"Cleanup confirmed: 1 known fixture document retained ({retained_id}) with {info.points_count} points in Qdrant; intermediate test artifacts purged.")
+        else:
+            print(f"Cleanup confirmed: {info.points_count} points remaining in Qdrant (zero orphaned vectors)")
     except Exception as exc:
         print(f"Qdrant cleanup check warning: {exc}")
 

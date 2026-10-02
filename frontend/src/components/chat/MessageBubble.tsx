@@ -19,6 +19,7 @@ import { CitationChip } from "./CitationChip";
 function StreamingCaret() {
   return (
     <motion.span
+      data-testid="streaming-caret"
       // Section 11.3 `▌`, animated as an opacity pulse while streaming.
       className="ml-0.5 inline-block h-[1em] w-[3px] translate-y-[2px] bg-accent align-baseline"
       animate={{ opacity: [1, 0.15, 1] }}
