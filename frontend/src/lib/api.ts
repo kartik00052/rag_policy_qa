@@ -272,6 +272,9 @@ async function runRealStream(
       if (event.type === "token") callbacks.onToken(event.text);
       else if (event.type === "done") final = event.payload;
     }
+  } catch (cause) {
+    if (signal.aborted) throw new ApiError(0, "Request cancelled.");
+    throw cause;
   } finally {
     reader.releaseLock();
   }

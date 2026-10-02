@@ -41,6 +41,7 @@ interface ConversationStore {
     hasSufficientEvidence: boolean,
   ) => void;
   failStream: (messageId: string, error: string) => void;
+  cancelStream: (messageId?: string) => void;
   clearError: () => void;
   reset: () => void;
 }
@@ -132,6 +133,28 @@ export const useConversationStore = create<ConversationStore>((set, get) => ({
       // never looks at the message itself.
       error,
     })),
+
+  cancelStream: (messageId) =>
+    set((state) => {
+      const targetId = messageId ?? state.streamingMessageId;
+      return {
+        messages: state.messages.map((message) => {
+          if (message.id === targetId || message.isStreaming) {
+            const hasContent =
+              typeof message.content === "string" &&
+              message.content.trim().length > 0;
+            return {
+              ...message,
+              content: hasContent ? message.content : "Generation cancelled.",
+              isStreaming: false,
+            };
+          }
+          return message;
+        }),
+        isStreaming: false,
+        streamingMessageId: null,
+      };
+    }),
 
   clearError: () => set({ error: null }),
 

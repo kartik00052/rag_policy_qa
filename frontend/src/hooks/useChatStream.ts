@@ -15,7 +15,7 @@
  *    appending to it.
  */
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { ApiError, listConversations, streamChat } from "@/lib/api";
 import { useConversationStore } from "@/stores/conversationStore";
 
@@ -33,10 +33,28 @@ export function useChatStream() {
   const appendToken = useConversationStore((state) => state.appendToken);
   const finalizeMessage = useConversationStore((state) => state.finalizeMessage);
   const failStream = useConversationStore((state) => state.failStream);
+  const cancelStream = useConversationStore((state) => state.cancelStream);
 
   // Held outside the store because it is a live transport handle, not UI state,
   // and nothing renders from it.
   const activeHandle = useRef<{ cancel: () => void } | null>(null);
+
+  const cancel = useCallback(() => {
+    if (activeHandle.current) {
+      activeHandle.current.cancel();
+      activeHandle.current = null;
+    }
+    cancelStream();
+  }, [cancelStream]);
+
+  useEffect(() => {
+    return () => {
+      if (activeHandle.current) {
+        activeHandle.current.cancel();
+        activeHandle.current = null;
+      }
+    };
+  }, []);
 
   const send = useCallback(
     async (query: string) => {
@@ -93,7 +111,11 @@ export function useChatStream() {
           // Background sync
         }
       } catch (cause) {
-        if (cause instanceof ApiError && cause.detail === "Request cancelled.") {
+        if (
+          (cause instanceof ApiError && cause.detail === "Request cancelled.") ||
+          (cause instanceof Error && (cause.name === "AbortError" || cause.message.includes("aborted")))
+        ) {
+          cancelStream(assistantId);
           return;
         }
         const detail =
@@ -107,11 +129,13 @@ export function useChatStream() {
       addMessage,
       appendToken,
       beginStreaming,
+      cancelStream,
       conversationId,
       failStream,
       finalizeMessage,
+      setConversationId,
     ],
   );
 
-  return { send };
+  return { send, cancel };
 }
