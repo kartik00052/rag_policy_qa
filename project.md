@@ -728,6 +728,12 @@ LLM_PROVIDER=<set explicitly, don't hardcode a vendor in code>
 EMBEDDING_MODEL=<set explicitly>
 ```
 
+> **Note on Redis in V1**: Redis is containerized, monitored, and verified healthy via `/health`.
+> Per V1 scope (Sections 2 and 3), document ingestion and conversation state execute in-process
+> within FastAPI without an external message broker or distributed cache. Real application traffic
+> on Redis is deliberately zero in V1 beyond `/health` connectivity verification; it is
+> provisioned in advance for V2 task queues and caching.
+
 ---
 
 ## 16. Definition of Done for V1
