@@ -88,6 +88,10 @@ export function useChatStream() {
         { query, conversation_id: conversationId ?? undefined },
         {
           onToken: appendToken,
+          onConversationId: (id) => {
+            setConversationId(id);
+            localStorage.setItem("rag_active_conversation_id", id);
+          },
           onError: (error) => failStream(assistantId, error.detail),
         },
       );

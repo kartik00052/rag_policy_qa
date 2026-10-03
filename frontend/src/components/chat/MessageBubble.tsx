@@ -50,9 +50,11 @@ export function MessageBubble({ message }: { message: Message }) {
       */}
       <div
         className={
-          message.hasSufficientEvidence
-            ? "text-[14px] leading-relaxed text-text-primary"
-            : "text-[14px] leading-relaxed text-warning"
+          message.content === "Generation cancelled."
+            ? "text-[13px] italic leading-relaxed text-text-muted"
+            : message.hasSufficientEvidence
+              ? "text-[14px] leading-relaxed text-text-primary"
+              : "text-[14px] leading-relaxed text-warning"
         }
       >
         {message.content}

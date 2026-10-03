@@ -23,6 +23,7 @@ afterwards. Neither transaction is held open across the stream.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -98,6 +99,18 @@ async def _close_conversation(conversation_id: uuid.UUID, state: dict) -> None:
         await chat_service.add_citations(session, message, citations)
 
 
+async def _record_cancelled_conversation(conversation_id: uuid.UUID) -> None:
+    """Store an honest 'Generation cancelled.' message if client disconnects mid-flight."""
+    try:
+        async with session_scope() as session:
+            await chat_service.add_message(
+                session, conversation_id, chat_service.ROLE_ASSISTANT, "Generation cancelled."
+            )
+            logger.info("recorded cancelled turn on conversation %s", conversation_id)
+    except Exception:
+        logger.exception("failed to record cancelled turn on conversation %s", conversation_id)
+
+
 @router.post(
     "/chat/stream",
     summary="Ask a question and stream the grounded answer with citations",
@@ -126,6 +139,13 @@ async def chat_stream(
                     yield _sse("token", TokenEvent(text=piece).model_dump())
                     continue
                 final_state = final
+        except asyncio.CancelledError:
+            logger.info("client disconnected mid-stream (cancelled)")
+            try:
+                await asyncio.shield(_record_cancelled_conversation(conversation_id))
+            except Exception:
+                pass
+            raise
         except Exception as exc:  # noqa: BLE001 - becomes an SSE error event
             logger.exception("chat stream failed")
             yield _sse("error", ErrorEvent(detail=str(exc)).model_dump())
@@ -144,7 +164,8 @@ async def chat_stream(
 
         assert final_state is not None
         if await request.is_disconnected():
-            logger.info("client disconnected mid-stream; dropping answer")
+            logger.info("client disconnected mid-stream; recording cancelled answer")
+            await _record_cancelled_conversation(conversation_id)
             return
 
         if final_state.get("error"):
@@ -164,7 +185,7 @@ async def chat_stream(
     return StreamingResponse(
         event_source(),
         media_type="text/event-stream",
-        headers=SSE_HEADERS,
+        headers={**SSE_HEADERS, "X-Conversation-Id": str(conversation_id)},
     )
 
 

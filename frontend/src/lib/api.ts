@@ -201,6 +201,8 @@ export interface ChatStreamHandle {
 
 export interface ChatStreamCallbacks {
   onToken: (text: string) => void;
+  /** Emitted as soon as the response headers arrive with the conversation ID. */
+  onConversationId?: (id: string) => void;
   /** Called for a server-sent `error` event, and for transport failures. */
   onError: (error: ApiError) => void;
 }
@@ -249,6 +251,11 @@ async function runRealStream(
   if (!response.ok) throw await toApiError(response);
   if (!response.body) {
     throw new ApiError(0, "The backend returned no response body to stream.");
+  }
+
+  const headerConversationId = response.headers.get("x-conversation-id");
+  if (headerConversationId && callbacks.onConversationId) {
+    callbacks.onConversationId(headerConversationId);
   }
 
   const parser = new SseParser();
