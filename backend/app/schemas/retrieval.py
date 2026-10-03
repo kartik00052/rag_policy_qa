@@ -33,7 +33,7 @@ class RetrievedChunk(BaseModel):
     filename: str
     chunk_index: int
     page_number: int | None
-    section: str
+    section: str | None = None
     heading_path: list[str] = Field(
         default_factory=list,
         description="Ancestor headings from document root to the owning section",
