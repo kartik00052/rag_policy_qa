@@ -355,6 +355,7 @@ def check_layer2_backend_api() -> bool:
     # 7. Insufficient-evidence question (pet travel / bringing animals to the office)
     # Note: New York accommodation cap is documented in the Acme travel policy
     # (Band A = 1500 USD), so an actual unevidenced query is required to test gate closure.
+    # Chosen because pets/animals are genuinely absent from the policy corpus; must be re-validated whenever new fixture documents (e.g. XLSX/CSV) are ingested.
     try:
         neg_query = "What is the company policy on pet travel and bringing animals to the office?"
         token_count = 0
