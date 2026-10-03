@@ -12,19 +12,21 @@ Layer 2 — Backend API:
   [3] GET /health returns status=ok and all dependencies green.
   [4] GET /api/v1/documents returns well-formed schema.
   [5] Document upload reaches ready status (no race condition, no process crash).
-  [6] POST /api/v1/chat/stream returns valid SSE tokens + done event with citations.
-  [7] Insufficient-evidence query returns has_sufficient_evidence=false with no token events.
+  [6] XLSX and CSV ingestion reaches ready status with markdown table chunks in Qdrant.
+  [7] POST /api/v1/chat/stream returns valid SSE tokens + done event with citations (PDF).
+  [8] XLSX and CSV targeted chat queries return accurate answers with real citations.
+  [9] Insufficient-evidence query returns has_sufficient_evidence=false with no token events.
 
 Layer 3 — Frontend:
-  [8] npm run build succeeds with zero errors.
-  [9] npx tsc -b passes with zero type errors.
-  [10] Dev server boots, app shell renders via Playwright with 0 console errors, Vite proxy works.
+  [10] npm run build succeeds with zero errors.
+  [11] npx tsc -b passes with zero type errors.
 
 Layer 4 — Real End-to-End User Flow:
-  [11] Full UI interaction via headless browser: document in sidebar, chat question,
+  [12] Dev server boots, app shell renders via Playwright with 0 console errors, Vite proxy works.
+  [13] Full UI interaction via headless browser: document in sidebar, chat question,
        citation chip clicked, Evidence panel shows highlighted matched_text,
-       page reload restores conversation history.
-  [12] Theme toggle renders both Espresso dark and Ivory light palettes with exact
+       page reload restores conversation history, stream cancellation recovers cleanly.
+  [14] Theme toggle renders both Espresso dark and Ivory light palettes with exact
        Section 10 hex tokens.
 
 Run:
@@ -62,6 +64,8 @@ from app.core.eventloop import configure_event_loop
 BACKEND_BASE = "http://127.0.0.1:8000"
 FRONTEND_BASE = "http://localhost:5173"
 FIXTURE_PATH = BACKEND_DIR / "scripts" / "fixtures" / "acme_travel_policy.pdf"
+XLSX_FIXTURE_PATH = BACKEND_DIR / "scripts" / "fixtures" / "acme_expense_codes.xlsx"
+CSV_FIXTURE_PATH = BACKEND_DIR / "scripts" / "fixtures" / "acme_equipment_allowances.csv"
 
 # Palette specs from project.md Section 10
 DARK_EXPECTED = {
@@ -214,6 +218,8 @@ def check_layer1_infra() -> bool:
 
 
 def check_layer2_backend_api() -> bool:
+    settings = get_settings()
+
     # 3. GET /health
     try:
         r = httpx.get(f"{BACKEND_BASE}/health", timeout=5.0)
@@ -302,7 +308,85 @@ def check_layer2_backend_api() -> bool:
     except Exception as exc:
         return report.record(5, "Document upload & ready status", False, f"Upload stress failed: {exc}")
 
-    # 6. Real chat question SSE stream
+    # 6. XLSX and CSV ingestion & Qdrant table chunk verification
+    try:
+        from qdrant_client import QdrantClient
+        from qdrant_client.http import models as qmodels
+
+        if not XLSX_FIXTURE_PATH.exists():
+            return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"Fixture not found: {XLSX_FIXTURE_PATH}")
+        if not CSV_FIXTURE_PATH.exists():
+            return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"Fixture not found: {CSV_FIXTURE_PATH}")
+
+        # Upload XLSX
+        with open(XLSX_FIXTURE_PATH, "rb") as f:
+            rx = httpx.post(
+                f"{BACKEND_BASE}/api/v1/documents",
+                files={"file": (XLSX_FIXTURE_PATH.name, f.read(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+                timeout=30.0,
+            )
+        if rx.status_code != 201:
+            return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"XLSX upload failed: HTTP {rx.status_code}")
+        xlsx_doc_id = str(rx.json()["document_id"])
+        created_doc_ids.append(xlsx_doc_id)
+
+        # Upload CSV
+        with open(CSV_FIXTURE_PATH, "rb") as f:
+            rc = httpx.post(
+                f"{BACKEND_BASE}/api/v1/documents",
+                files={"file": (CSV_FIXTURE_PATH.name, f.read(), "text/csv")},
+                timeout=30.0,
+            )
+        if rc.status_code != 201:
+            return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"CSV upload failed: HTTP {rc.status_code}")
+        csv_doc_id = str(rc.json()["document_id"])
+        created_doc_ids.append(csv_doc_id)
+
+        # Poll both to ready
+        for did, dname in [(xlsx_doc_id, "XLSX"), (csv_doc_id, "CSV")]:
+            deadline = time.perf_counter() + 90.0
+            fstatus = None
+            while time.perf_counter() < deadline:
+                time.sleep(1.5)
+                sr = httpx.get(f"{BACKEND_BASE}/api/v1/documents/{did}", timeout=30.0)
+                if sr.status_code == 200:
+                    fstatus = sr.json().get("status")
+                    if fstatus in ("ready", "failed"):
+                        break
+            if fstatus != "ready":
+                return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"{dname} document reached '{fstatus}' instead of 'ready'")
+
+        # Verify Qdrant chunks: stored as markdown tables, never flattened to prose
+        qc = QdrantClient(url=settings.qdrant_url)
+        for did, dname in [(xlsx_doc_id, "XLSX"), (csv_doc_id, "CSV")]:
+            res, _ = qc.scroll(
+                collection_name=settings.qdrant_collection,
+                scroll_filter=qmodels.Filter(
+                    must=[qmodels.FieldCondition(key="document_id", match=qmodels.MatchValue(value=did))]
+                ),
+                limit=10,
+                with_payload=True,
+            )
+            if not res:
+                return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"No chunks found in Qdrant for {dname} document {did}")
+            for pt in res:
+                payload = pt.payload or {}
+                if payload.get("content_type") != "table":
+                    return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"{dname} chunk content_type={payload.get('content_type')} (expected 'table')")
+                content = payload.get("content", "")
+                if "|" not in content:
+                    return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"{dname} chunk content is not markdown table: {content[:50]}")
+
+        report.record(
+            6,
+            "XLSX/CSV ingestion & Qdrant chunks",
+            True,
+            "Both XLSX and CSV reached ready status; Qdrant verified table chunks preserved as markdown",
+        )
+    except Exception as exc:
+        return report.record(6, "XLSX/CSV ingestion & Qdrant chunks", False, f"Ingestion verification failed: {exc}")
+
+    # 7. Real chat question SSE stream (PDF)
     try:
         query = "How long do I have to submit an expense claim after a trip?"
         body = {"query": query}
@@ -312,7 +396,7 @@ def check_layer2_backend_api() -> bool:
             "POST", f"{BACKEND_BASE}/api/v1/chat/stream", json=body, timeout=120.0
         ) as response:
             if response.status_code != 200:
-                return report.record(6, "Chat SSE stream shape", False, f"HTTP {response.status_code}")
+                return report.record(7, "Chat SSE stream shape (PDF)", False, f"HTTP {response.status_code}")
             current_event = None
             for line in response.iter_lines():
                 if line.startswith("event: "):
@@ -326,33 +410,98 @@ def check_layer2_backend_api() -> bool:
                     current_event = None
 
         if not done_payload:
-            return report.record(6, "Chat SSE stream shape", False, "No 'done' event received")
+            return report.record(7, "Chat SSE stream shape (PDF)", False, "No 'done' event received")
         required_keys = {"answer", "has_sufficient_evidence", "citations"}
         if not required_keys.issubset(done_payload.keys()):
             return report.record(
-                6, "Chat SSE stream shape", False, f"Done event missing keys: {required_keys - set(done_payload.keys())}"
+                7, "Chat SSE stream shape (PDF)", False, f"Done event missing keys: {required_keys - set(done_payload.keys())}"
             )
         if not done_payload.get("has_sufficient_evidence"):
-            return report.record(6, "Chat SSE stream shape", False, "Expected has_sufficient_evidence=True")
+            return report.record(7, "Chat SSE stream shape (PDF)", False, "Expected has_sufficient_evidence=True")
         citations = done_payload.get("citations", [])
         if not citations:
-            return report.record(6, "Chat SSE stream shape", False, "No citations in answered done payload")
+            return report.record(7, "Chat SSE stream shape (PDF)", False, "No citations in answered done payload")
         cit_keys = {"id", "document_id", "document_name", "page", "section", "matched_text", "relevance"}
         for cit in citations:
             if not cit_keys.issubset(cit.keys()):
                 return report.record(
-                    6, "Chat SSE stream shape", False, f"Citation missing keys: {cit_keys - set(cit.keys())}"
+                    7, "Chat SSE stream shape (PDF)", False, f"Citation missing keys: {cit_keys - set(cit.keys())}"
                 )
         report.record(
-            6,
-            "Chat SSE stream shape",
+            7,
+            "Chat SSE stream shape (PDF)",
             True,
             f"Received {token_count} tokens + done event with {len(citations)} valid citation(s)",
         )
     except Exception as exc:
-        return report.record(6, "Chat SSE stream shape", False, f"Chat stream failed: {exc}")
+        return report.record(7, "Chat SSE stream shape (PDF)", False, f"Chat stream failed: {exc}")
 
-    # 7. Insufficient-evidence question (pet travel / bringing animals to the office)
+    # 8. Targeted chat questions against XLSX and CSV content
+    try:
+        # 8.1 XLSX question (answerable only from acme_expense_codes.xlsx)
+        q_xlsx = "What is the maximum limit and approval required for EXP-303 emergency baggage replacement?"
+        done_xlsx = None
+        tok_xlsx = 0
+        with httpx.stream("POST", f"{BACKEND_BASE}/api/v1/chat/stream", json={"query": q_xlsx}, timeout=120.0) as resp:
+            if resp.status_code != 200:
+                return report.record(8, "XLSX/CSV targeted chat queries", False, f"XLSX query HTTP {resp.status_code}")
+            ce = None
+            for line in resp.iter_lines():
+                if line.startswith("event: "):
+                    ce = line[7:].strip()
+                elif line.startswith("data: ") and ce:
+                    dstr = line[6:].strip()
+                    if ce == "token":
+                        tok_xlsx += 1
+                    elif ce == "done":
+                        done_xlsx = json.loads(dstr)
+                    ce = None
+        if not done_xlsx or not done_xlsx.get("has_sufficient_evidence"):
+            return report.record(8, "XLSX/CSV targeted chat queries", False, "XLSX query rejected by evidence gate")
+        ans_xlsx = done_xlsx.get("answer", "")
+        if "250" not in ans_xlsx and "Director" not in ans_xlsx:
+            return report.record(8, "XLSX/CSV targeted chat queries", False, f"XLSX answer inaccurate: '{ans_xlsx}'")
+        cits_xlsx = done_xlsx.get("citations", [])
+        if not cits_xlsx or not any("acme_expense_codes" in c.get("document_name", "") for c in cits_xlsx):
+            return report.record(8, "XLSX/CSV targeted chat queries", False, f"XLSX citations missing or incorrect: {cits_xlsx}")
+
+        # 8.2 CSV question (answerable only from acme_equipment_allowances.csv)
+        q_csv = "What is the annual allowance and replacement cycle for an ergonomic chair?"
+        done_csv = None
+        tok_csv = 0
+        with httpx.stream("POST", f"{BACKEND_BASE}/api/v1/chat/stream", json={"query": q_csv}, timeout=120.0) as resp:
+            if resp.status_code != 200:
+                return report.record(8, "XLSX/CSV targeted chat queries", False, f"CSV query HTTP {resp.status_code}")
+            ce = None
+            for line in resp.iter_lines():
+                if line.startswith("event: "):
+                    ce = line[7:].strip()
+                elif line.startswith("data: ") and ce:
+                    dstr = line[6:].strip()
+                    if ce == "token":
+                        tok_csv += 1
+                    elif ce == "done":
+                        done_csv = json.loads(dstr)
+                    ce = None
+        if not done_csv or not done_csv.get("has_sufficient_evidence"):
+            return report.record(8, "XLSX/CSV targeted chat queries", False, "CSV query rejected by evidence gate")
+        ans_csv = done_csv.get("answer", "")
+        if "450" not in ans_csv and "3 years" not in ans_csv:
+            return report.record(8, "XLSX/CSV targeted chat queries", False, f"CSV answer inaccurate: '{ans_csv}'")
+        cits_csv = done_csv.get("citations", [])
+        if not cits_csv or not any("acme_equipment_allowances" in c.get("document_name", "") for c in cits_csv):
+            return report.record(8, "XLSX/CSV targeted chat queries", False, f"CSV citations missing or incorrect: {cits_csv}")
+
+        report.record(
+            8,
+            "XLSX/CSV targeted chat queries",
+            True,
+            f"Both XLSX ({tok_xlsx} tokens, EXP-303) and CSV ({tok_csv} tokens, Ergonomic Chair) answered accurately with citations",
+        )
+    except Exception as exc:
+        return report.record(8, "XLSX/CSV targeted chat queries", False, f"XLSX/CSV query failed: {exc}")
+
+    # 9. Insufficient-evidence question (pet travel / bringing animals to the office)
     # Note: New York accommodation cap is documented in the Acme travel policy
     # (Band A = 1500 USD), so an actual unevidenced query is required to test gate closure.
     # Chosen because pets/animals are genuinely absent from the policy corpus; must be re-validated whenever new fixture documents (e.g. XLSX/CSV) are ingested.
@@ -364,7 +513,7 @@ def check_layer2_backend_api() -> bool:
             "POST", f"{BACKEND_BASE}/api/v1/chat/stream", json={"query": neg_query}, timeout=120.0
         ) as response:
             if response.status_code != 200:
-                return report.record(7, "Insufficient-evidence gate check", False, f"HTTP {response.status_code}")
+                return report.record(9, "Insufficient-evidence gate check", False, f"HTTP {response.status_code}")
             current_event = None
             for line in response.iter_lines():
                 if line.startswith("event: "):
@@ -378,35 +527,35 @@ def check_layer2_backend_api() -> bool:
                     current_event = None
 
         if not done_payload:
-            return report.record(7, "Insufficient-evidence gate check", False, "No 'done' event received")
+            return report.record(9, "Insufficient-evidence gate check", False, "No 'done' event received")
         if done_payload.get("has_sufficient_evidence") is not False:
             return report.record(
-                7,
+                9,
                 "Insufficient-evidence gate check",
                 False,
                 f"Expected has_sufficient_evidence=False, got {done_payload.get('has_sufficient_evidence')}",
             )
         if token_count > 0:
             return report.record(
-                7,
+                9,
                 "Insufficient-evidence gate check",
                 False,
                 f"Evidence gate failed to short-circuit: received {token_count} token events",
             )
         report.record(
-            7,
+            9,
             "Insufficient-evidence gate check",
             True,
             "has_sufficient_evidence=False with 0 token events (gate short-circuited correctly)",
         )
     except Exception as exc:
-        return report.record(7, "Insufficient-evidence gate check", False, f"Gate test failed: {exc}")
+        return report.record(9, "Insufficient-evidence gate check", False, f"Gate test failed: {exc}")
 
     return True
 
 
 def check_layer3_frontend_build() -> bool:
-    # 8. npm run build
+    # 10. npm run build
     try:
         proc = subprocess.run(
             ["npm.cmd", "run", "build"],
@@ -416,12 +565,12 @@ def check_layer3_frontend_build() -> bool:
             timeout=120,
         )
         if proc.returncode != 0:
-            return report.record(8, "Frontend: npm run build", False, f"Build failed (code {proc.returncode}): {proc.stderr[:100]}")
-        report.record(8, "Frontend: npm run build", True, "Production bundle built successfully (zero errors)")
+            return report.record(10, "Frontend: npm run build", False, f"Build failed (code {proc.returncode}): {proc.stderr[:100]}")
+        report.record(10, "Frontend: npm run build", True, "Production bundle built successfully (zero errors)")
     except Exception as exc:
-        return report.record(8, "Frontend: npm run build", False, f"Process execution failed: {exc}")
+        return report.record(10, "Frontend: npm run build", False, f"Process execution failed: {exc}")
 
-    # 9. npx tsc -b
+    # 11. npx tsc -b
     try:
         proc = subprocess.run(
             ["npx.cmd", "tsc", "-b"],
@@ -431,10 +580,10 @@ def check_layer3_frontend_build() -> bool:
             timeout=60,
         )
         if proc.returncode != 0:
-            return report.record(9, "Frontend: npx tsc -b", False, f"TypeScript check failed: {proc.stdout[:100]}")
-        report.record(9, "Frontend: npx tsc -b", True, "Zero TypeScript errors")
+            return report.record(11, "Frontend: npx tsc -b", False, f"TypeScript check failed: {proc.stdout[:100]}")
+        report.record(11, "Frontend: npx tsc -b", True, "Zero TypeScript errors")
     except Exception as exc:
-        return report.record(9, "Frontend: npx tsc -b", False, f"tsc execution failed: {exc}")
+        return report.record(11, "Frontend: npx tsc -b", False, f"tsc execution failed: {exc}")
 
     return True
 
@@ -446,7 +595,7 @@ def check_layer4_e2e_playwright() -> bool:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-    # 10. Dev server boot & proxy check
+    # 12. Dev server boot & proxy check
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -462,23 +611,23 @@ def check_layer4_e2e_playwright() -> bool:
             # Check for console errors
             if console_errors:
                 browser.close()
-                return report.record(10, "Dev server boot & Vite proxy", False, f"Console errors: {console_errors}")
+                return report.record(12, "Dev server boot & Vite proxy", False, f"Console errors: {console_errors}")
 
             # Verify Vite proxy reaches real backend
             proxy_resp = page.evaluate("async () => { const r = await fetch('/api/v1/documents'); return r.status; }")
             if proxy_resp != 200:
                 browser.close()
-                return report.record(10, "Dev server boot & Vite proxy", False, f"Proxy /api/v1/documents returned {proxy_resp}")
+                return report.record(12, "Dev server boot & Vite proxy", False, f"Proxy /api/v1/documents returned {proxy_resp}")
 
             report.record(
-                10,
+                12,
                 "Dev server boot & Vite proxy",
                 True,
                 "Dev server rendered with 0 console errors; Vite proxy /api/v1 returned 200",
             )
 
-            # 11. Real end-to-end user flow (DoD 1-4)
-            # 11.1 Check document in sidebar
+            # 13. Real end-to-end user flow (DoD 1-4)
+            # 13.1 Check document in sidebar
             sidebar = page.locator("aside")
             if "acme_travel_policy.pdf" not in sidebar.inner_text():
                 # Upload fixture via file input
@@ -489,7 +638,7 @@ def check_layer4_e2e_playwright() -> bool:
             # Wait for document to show ready in sidebar
             page.wait_for_selector("aside:has-text('acme_travel_policy.pdf')", timeout=30000)
 
-            # 11.2 Ask question through chat input
+            # 13.2 Ask question through chat input
             chat_input = page.locator("textarea[aria-label='Ask a question']")
             chat_input.fill("How long do I have to submit an expense claim after a trip?")
             send_btn = page.locator("button[aria-label='Send question']")
@@ -499,43 +648,43 @@ def check_layer4_e2e_playwright() -> bool:
             page.wait_for_selector("button[title*='acme_travel_policy']", timeout=120000)
             citation_chip = page.locator("button[title*='acme_travel_policy']").first
 
-            # 11.3 Post-answer UI state assertions (verify no stuck streaming artifacts)
+            # 13.3 Post-answer UI state assertions (verify no stuck streaming artifacts)
             page.wait_for_selector("textarea[aria-label='Ask a question']:not([disabled])", timeout=15000)
             if chat_input.is_disabled():
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "Chat input remained disabled after stream completed")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, "Chat input remained disabled after stream completed")
 
             placeholder_after = chat_input.get_attribute("placeholder") or ""
             if "Answering" in placeholder_after:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Chat input placeholder did not revert: '{placeholder_after}'")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, f"Chat input placeholder did not revert: '{placeholder_after}'")
 
             caret_count = page.evaluate("() => document.querySelectorAll('[data-testid=\"streaming-caret\"]').length")
             if caret_count > 0:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Streaming caret still present in DOM after answer completed (found {caret_count})")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, f"Streaming caret still present in DOM after answer completed (found {caret_count})")
 
             is_streaming_store = page.evaluate("() => window.__conversationStore ? window.__conversationStore.getState().isStreaming : false")
             if is_streaming_store:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "conversationStore.isStreaming is still true after completion")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, "conversationStore.isStreaming is still true after completion")
 
-            # 11.4 Click citation chip and verify Evidence panel opens
+            # 13.4 Click citation chip and verify Evidence panel opens
             citation_chip.click()
             page.wait_for_selector("aside[aria-label='Evidence']", timeout=20000)
             evidence_panel = page.locator("aside[aria-label='Evidence']")
             mark_text = evidence_panel.locator("mark").inner_text()
             if not mark_text or len(mark_text.strip()) == 0:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "Evidence panel mark element is empty")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, "Evidence panel mark element is empty")
 
-            # 11.5 Reload page and confirm history restores
+            # 13.5 Reload page and confirm history restores
             page.wait_for_timeout(1000)
             page.reload()
             page.wait_for_load_state("networkidle")
             page.wait_for_selector("text=How long do I have to submit an expense claim", timeout=20000)
 
-            # 11.6 Stream cancellation regression test (P0-A regression test)
+            # 13.6 Stream cancellation regression test (P0-A regression test)
             chat_input = page.locator("textarea[aria-label='Ask a question']")
             chat_input.fill("What is the meal allowance per day on business trips?")
             send_btn = page.locator("button[aria-label='Send question']")
@@ -551,28 +700,28 @@ def check_layer4_e2e_playwright() -> bool:
             cancelled_placeholder = chat_input.get_attribute("placeholder") or ""
             if "Answering" in cancelled_placeholder:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Input placeholder did not revert on cancel: '{cancelled_placeholder}'")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, f"Input placeholder did not revert on cancel: '{cancelled_placeholder}'")
 
             cancelled_carets = page.evaluate("() => document.querySelectorAll('[data-testid=\"streaming-caret\"]').length")
             if cancelled_carets > 0:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, f"Streaming caret stuck after cancel (found {cancelled_carets})")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, f"Streaming caret stuck after cancel (found {cancelled_carets})")
 
             cancelled_store_streaming = page.evaluate("() => window.__conversationStore ? window.__conversationStore.getState().isStreaming : false")
             if cancelled_store_streaming:
                 browser.close()
-                return report.record(11, "End-to-end user flow (DoD 1-4)", False, "conversationStore.isStreaming remained true after cancel")
+                return report.record(13, "End-to-end user flow (DoD 1-4)", False, "conversationStore.isStreaming remained true after cancel")
 
             page.wait_for_selector("text=Generation cancelled", timeout=5000)
 
             report.record(
-                11,
+                13,
                 "End-to-end user flow (DoD 1-4)",
                 True,
                 f"Document ready -> answer streamed -> post-UI clean -> chip clicked -> Evidence mark: '{mark_text[:20]}...' -> history restored -> cancellation recovered cleanly",
             )
 
-            # 12. Theme toggle & palette verification (Section 10)
+            # 14. Theme toggle & palette verification (Section 10)
             initial_theme = page.evaluate("document.documentElement.dataset.theme || 'dark'")
             if initial_theme == "light":
                 first_expected, second_expected = LIGHT_EXPECTED, DARK_EXPECTED
@@ -593,7 +742,7 @@ def check_layer4_e2e_playwright() -> bool:
             first_mismatches = [f"{k}: got {first_tokens.get(k)} vs {v}" for k, v in first_expected.items() if first_tokens.get(k) != v]
             if first_mismatches:
                 browser.close()
-                return report.record(12, "Theme toggle & palette tokens", False, f"{first_name} token mismatches: {first_mismatches}")
+                return report.record(14, "Theme toggle & palette tokens", False, f"{first_name} token mismatches: {first_mismatches}")
 
             # Toggle to opposite theme via UI button
             theme_btn = page.locator("button[aria-label*='theme' i]")
@@ -612,10 +761,10 @@ def check_layer4_e2e_playwright() -> bool:
             second_mismatches = [f"{k}: got {second_tokens.get(k)} vs {v}" for k, v in second_expected.items() if second_tokens.get(k) != v]
             if second_mismatches:
                 browser.close()
-                return report.record(12, "Theme toggle & palette tokens", False, f"{second_name} token mismatches: {second_mismatches}")
+                return report.record(14, "Theme toggle & palette tokens", False, f"{second_name} token mismatches: {second_mismatches}")
 
             report.record(
-                12,
+                14,
                 "Theme toggle & palette tokens",
                 True,
                 "Both Espresso dark and Ivory light palettes match Section 10 hex tokens exactly",
@@ -623,7 +772,7 @@ def check_layer4_e2e_playwright() -> bool:
 
             browser.close()
     except Exception as exc:
-        return report.record(11, "End-to-end browser flow", False, f"Playwright error: {exc}")
+        return report.record(13, "End-to-end browser flow", False, f"Playwright error: {exc}")
 
     return True
 
@@ -636,7 +785,7 @@ async def cleanup_test_data(preserve_one_fixture: bool = True) -> None:
     to_purge = list(created_doc_ids)
     retained_id = None
     if preserve_one_fixture and len(to_purge) >= 1:
-        retained_id = to_purge.pop()
+        retained_id = to_purge.pop(0)
 
     async with session_scope() as session:
         for did in to_purge:
