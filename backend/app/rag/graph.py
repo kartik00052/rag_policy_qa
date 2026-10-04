@@ -72,7 +72,7 @@ from app.rag.prompts import (
 from app.rag.restatement import MAX_OVERLAP, worst_overlap
 from app.rag.state import RAGState
 from app.services.evidence import NO_EVIDENCE_ANSWER, assess
-from app.services.llm import ProviderStats, get_llm
+from app.services.llm import LLMRateLimitError, ProviderStats, get_llm
 from app.services.reranker import rerank
 from app.services.retrieval import (
     hits_to_retrieved_chunks,
@@ -279,24 +279,35 @@ async def _collect(
     return "".join(pieces), pieces, (stats[0] if stats else None)
 
 
-async def _replay(pieces: list[str], sink: asyncio.Queue) -> None:
+def _normalize_stream_pieces(pieces: list[str]) -> list[str]:
+    """Break large chunks into word/whitespace tokens for smooth client streaming."""
+    normalized: list[str] = []
+    for piece in pieces:
+        if len(piece) <= 12 and (" " not in piece or piece.endswith(" ") or piece.startswith(" ")):
+            normalized.append(piece)
+        else:
+            sub_parts = re.findall(r"\S+|\s+", piece)
+            normalized.extend(sub_parts if sub_parts else [piece])
+    return normalized
+
+
+async def _replay(pieces: list[str], sink: asyncio.Queue, delay: float = 0.02) -> None:
     """Replay a pre-collected generation into *sink* piece by piece.
 
-    The inter-piece sleep matches the original streaming cadence rather than
-    dumping all tokens at once, so the client experience is indistinguishable
-    from a live stream of the same answer. The delay is not precision-critical:
-    a fixed 80ms is inside the measured inter-token gap of 80–110ms and short
-    enough that a replay of any reasonable answer adds under 5 seconds of
-    additional wait beyond the generation time.
+    Preserves the validate-then-replay design: client only receives validated
+    text. Normalizes chunks to fine-grained token/word granularity and paces
+    replay at ~50 tokens/sec so the streaming UX is smooth across all providers.
     """
-    for piece in pieces:
-        await sink.put(piece)
-        await asyncio.sleep(0.08)
+    tokens = _normalize_stream_pieces(pieces)
+    for token in tokens:
+        await sink.put(token)
+        await asyncio.sleep(delay)
 
 
 async def generate_answer_node(state: RAGState) -> dict[str, Any]:
     """Stage 5 generation. Only reached when the gate opened."""
-    settings = get_settings()
+    llm = get_llm()
+    model_name = llm.model_name
     chunks = state.get("reranked_chunks") or []
     sink = state.get("token_sink")
     messages = build_messages(state["query"], chunks)
@@ -321,7 +332,7 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "attempts": attempts,
             "generation_stats": attempt_stats,
-            "model": settings.ollama_model,
+            "model": model_name,
         }
         payload.update(extra)
         return payload
@@ -342,7 +353,7 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
                 "done_reason=%s",
                 index,
                 attempts,
-                settings.ollama_model,
+                model_name,
                 query[:80],
                 outcome if index == attempts else "rejected",
                 stats.prompt_eval_count,
@@ -360,7 +371,7 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
                 "generation made %d call(s) to %s for %r with no provider timings; "
                 "outcome=%s",
                 attempts,
-                settings.ollama_model,
+                model_name,
                 query[:80],
                 outcome,
             )
@@ -370,9 +381,19 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
     # receives token events from an answer that fails validation.
     try:
         raw, first_pieces, first_stats = await _collect(messages)
+    except LLMRateLimitError as exc:
+        _account(None)
+        logger.exception("rate limit hit for model %s", model_name)
+        return _telemetry(
+            answer=f"Rate limit reached for {llm.provider_name} ({model_name}): {exc}",
+            citations=[],
+            has_sufficient_evidence=False,
+            error=str(exc),
+            outcome="rate-limit-error",
+        )
     except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
         _account(None)
-        logger.exception("generation failed for model %s", settings.ollama_model)
+        logger.exception("generation failed for model %s", model_name)
         return _telemetry(
             answer=GENERATION_FAILED_ANSWER,
             citations=[],
@@ -425,6 +446,16 @@ async def generate_answer_node(state: RAGState) -> dict[str, Any]:
             # Silent: collected for validation; replayed below only if it passes.
             raw, accepted_pieces, retry_stats = await _collect(
                 build_retry_messages(messages, raw, correction)
+            )
+        except LLMRateLimitError as exc:
+            _account(None)
+            logger.exception("rate limit hit on retry for model %s", model_name)
+            return _telemetry(
+                answer=f"Rate limit reached for {llm.provider_name} ({model_name}): {exc}",
+                citations=[],
+                has_sufficient_evidence=False,
+                error=str(exc),
+                outcome="rate-limit-error",
             )
         except Exception as exc:  # noqa: BLE001 - surfaced below, not swallowed
             _account(None)
