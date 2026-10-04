@@ -6,7 +6,7 @@ and workflow.md Section 6 (Verification Protocol):
 
 Layer 1 — Infrastructure:
   [1] Docker containers up & healthy: PostgreSQL query, Qdrant collections, Redis PING.
-  [2] Ollama running & OLLAMA_MODEL available via /api/tags.
+  [2] LLM provider reachable: Groq/Gemini API probe or Ollama /api/tags + warmup.
 
 Layer 2 — Backend API:
   [3] GET /health returns status=ok and all dependencies green.
@@ -180,39 +180,73 @@ def check_layer1_infra() -> bool:
         "PostgreSQL (SELECT 1), Qdrant (/collections), Redis (PONG) all healthy",
     )
 
-    # 2. Ollama running & model available
+    # 2. LLM provider reachable (provider-agnostic since Stage 10)
+    provider = settings.llm_provider.strip().lower()
+    check_name = f"LLM provider reachable ({provider})"
     try:
-        r = httpx.get(f"{settings.ollama_base_url}/api/tags", timeout=5.0)
-        if r.status_code != 200:
-            return report.record(2, "Ollama running & model available", False, f"HTTP {r.status_code}")
-        models = [m.get("name", "") for m in r.json().get("models", [])]
-        expected_model = settings.ollama_model
-        model_found = any(expected_model in m or m.startswith(expected_model) for m in models)
-        if not model_found:
-            return report.record(
-                2,
-                "Ollama running & model available",
-                False,
-                f"Model '{expected_model}' not found in tags: {models}",
-            )
-        # Warm up model so subsequent chat calls don't suffer from cold-start delay
-        try:
-            httpx.post(
-                f"{settings.ollama_base_url}/api/chat",
-                json={"model": expected_model, "messages": [{"role": "user", "content": "ping"}], "stream": False},
-                timeout=30.0,
-            )
-        except Exception:
-            pass
+        if provider == "groq":
+            # Probe the Groq models endpoint — any 200 means the key and network are good.
+            headers = {"Authorization": f"Bearer {settings.groq_api_key.strip()}"}
+            r = httpx.get("https://api.groq.com/openai/v1/models", headers=headers, timeout=10.0)
+            if r.status_code != 200:
+                return report.record(2, check_name, False, f"Groq API HTTP {r.status_code}")
+            model_ids = [m.get("id", "") for m in r.json().get("data", [])]
+            expected_model = settings.groq_model.strip()
+            model_found = any(expected_model == m or m.startswith(expected_model) for m in model_ids)
+            if not model_found:
+                return report.record(
+                    2, check_name, False,
+                    f"Model '{expected_model}' not in Groq list: {model_ids[:5]}…"
+                )
+            report.record(2, check_name, True,
+                          f"Groq reachable, model '{expected_model}' listed")
 
-        report.record(
-            2,
-            "Ollama running & model available",
-            True,
-            f"Ollama running with model '{expected_model}' available (warmed up)",
-        )
+        elif provider == "gemini":
+            # Probe the Gemini models list endpoint via google-generativeai REST.
+            api_key = settings.google_api_key.strip()
+            r = httpx.get(
+                f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}",
+                timeout=10.0,
+            )
+            if r.status_code != 200:
+                return report.record(2, check_name, False, f"Gemini API HTTP {r.status_code}")
+            model_ids = [m.get("name", "") for m in r.json().get("models", [])]
+            expected_model = settings.gemini_model.strip()
+            model_found = any(expected_model in m for m in model_ids)
+            if not model_found:
+                return report.record(
+                    2, check_name, False,
+                    f"Model '{expected_model}' not in Gemini list: {model_ids[:5]}…"
+                )
+            report.record(2, check_name, True,
+                          f"Gemini reachable, model '{expected_model}' listed")
+
+        else:  # ollama (default local fallback)
+            r = httpx.get(f"{settings.ollama_base_url}/api/tags", timeout=5.0)
+            if r.status_code != 200:
+                return report.record(2, check_name, False, f"Ollama HTTP {r.status_code}")
+            models = [m.get("name", "") for m in r.json().get("models", [])]
+            expected_model = settings.ollama_model
+            model_found = any(expected_model in m or m.startswith(expected_model) for m in models)
+            if not model_found:
+                return report.record(
+                    2, check_name, False,
+                    f"Model '{expected_model}' not found in Ollama tags: {models}",
+                )
+            # Warm up Ollama so subsequent chat calls don't suffer cold-start delay
+            try:
+                httpx.post(
+                    f"{settings.ollama_base_url}/api/chat",
+                    json={"model": expected_model, "messages": [{"role": "user", "content": "ping"}], "stream": False},
+                    timeout=30.0,
+                )
+            except Exception:
+                pass
+            report.record(2, check_name, True,
+                          f"Ollama running with model '{expected_model}' available (warmed up)")
+
     except Exception as exc:
-        return report.record(2, "Ollama running & model available", False, f"Connection failed: {exc}")
+        return report.record(2, check_name, False, f"Connection failed: {exc}")
 
     return True
 

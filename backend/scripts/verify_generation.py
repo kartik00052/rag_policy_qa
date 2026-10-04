@@ -68,7 +68,7 @@ QUESTIONS: list[tuple[str, list[str]]] = [
     ),
     (
         "What is the nightly accommodation cap in New York?",
-        ["1500"],
+        ["1,500"],  # model renders "$1,500" — bare "1500" doesn't match due to comma
     ),
     (
         "Can I book business class for a five hour flight?",
