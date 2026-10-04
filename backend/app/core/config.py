@@ -85,14 +85,14 @@ class Settings(BaseSettings):
 
     # Groq configuration (cloud, default for latency)
     groq_api_key: str | None = None
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_model: str = "qwen/qwen3.8-27b"
 
     # Google Gemini configuration (cloud, secondary)
     google_api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("google_api_key", "gemini_api_key"),
     )
-    gemini_model: str = "gemini-2.0-flash"
+    gemini_model: str = "gemini-3.5-flash"
 
     # Ollama configuration (local fallback)
     ollama_base_url: str = "http://localhost:11434"
