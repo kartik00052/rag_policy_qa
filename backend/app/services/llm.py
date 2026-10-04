@@ -1,60 +1,52 @@
-"""LLM provider access (Stage 5).
+"""LLM provider access (Stage 5 / Stage 10).
 
-PROJECT.md Section 4 scopes LangChain to "providers only", so the provider is
-reached over its own HTTP API rather than through a framework abstraction. That
-keeps the dependency surface small and means the provider named in configuration
-is the only thing that changes when the backend moves.
+PROJECT.md Section 4 and Section 4.1 define a pluggable LLM provider layer
+using LangChain integrations behind a uniform LLMProvider interface:
+- Groq (default, cloud LPU inference for low latency)
+- Gemini (secondary cloud option via Google GenAI)
+- Ollama (offline / private local fallback)
 
-V1 ships one provider, ``ollama``. ``llm_provider`` selects it from config, so no
-vendor is hardcoded in application logic; an unknown name fails loudly at first
-use rather than silently falling back (WORKFLOW.md Golden Rule 10).
-
-Failures are raised, never swallowed. A provider that is down, a model that is
-not pulled, or a non-200 response all surface as :class:`LLMUnavailableError` so
-the SSE stream can emit an error event instead of appearing to succeed.
+Selected by ``LLM_PROVIDER`` ("groq" | "gemini" | "ollama") in configuration.
+Failures are raised, never swallowed (WORKFLOW.md Golden Rule 10). Rate limits
+are caught and surfaced as :class:`LLMRateLimitError` with clear quota details
+rather than failing silently or looking like an empty answer.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import asdict, dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
-import httpx
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
-#: A chat message. Kept as a plain dict because that is what every provider
-#: HTTP API this project might add expects.
+#: A chat message. Kept as a plain dict (role, content) for provider independence.
 Message = dict[str, str]
 
 
 @dataclass(frozen=True)
 class ProviderStats:
-    """One generation's own timing breakdown, as reported by the provider.
+    """One generation's timing and token breakdown.
 
-    Ollama measures these server-side and returns them on the final ``done``
-    event of ``/api/chat``, in nanoseconds. They are recorded because the
-    wall-clock number alone cannot say *where* the time went, and the three
-    costs have completely different fixes:
-
-    * ``load_duration`` - resident, or evicted and reloaded from disk on this
-      request. Nonzero on a repeat request is pure waste; ``keep_alive`` is the
-      fix.
-    * ``prompt_eval_duration`` - prefill over the whole context, which scales
-      with the real prompt length and is paid on the first attempt *and* every
-      retry, since a retry replays the original messages. Shrinking ``num_ctx``
-      is what moves this.
-    * ``eval_duration`` - decode, per generated token. A rambling generation
-      inflates this until it is the entire cost, and ``num_predict`` is what
-      bounds it.
-
-    ``tokens_per_second`` is derived from the last two and is the honest measure
-    of decode speed on this machine, because it excludes load and prefill.
+    Ollama measures these server-side on its ``done`` event in nanoseconds.
+    Cloud providers (Groq, Gemini) supply usage metadata (input/output tokens)
+    and wall-clock duration, converted to the same nanosecond schema so every
+    caller (telemetry, debug endpoint, latency scripts) formats one shape.
     """
 
     total_duration: int = 0
@@ -67,14 +59,8 @@ class ProviderStats:
 
     @classmethod
     def from_event(cls, event: dict) -> ProviderStats | None:
-        """Build stats from a ``done`` event, or ``None`` if it carries none.
-
-        ``None`` rather than zeros when the fields are absent, so a provider
-        that reports no timings is distinguishable from one that genuinely took
-        no time. A zeroed :class:`ProviderStats` would otherwise read as
-        "infinitely fast" in a latency report.
-        """
-        if not event.get("done"):
+        """Build stats from an Ollama ``done`` event or dictionary."""
+        if not event.get("done") and "total_duration" not in event:
             return None
         fields = (
             "total_duration",
@@ -89,6 +75,31 @@ class ProviderStats:
         return cls(
             **{key: int(event.get(key) or 0) for key in fields},
             done_reason=str(event.get("done_reason") or ""),
+        )
+
+    @classmethod
+    def from_usage(
+        cls,
+        usage: dict | None,
+        duration_seconds: float,
+        done_reason: str = "stop",
+        fallback_eval_count: int = 0,
+    ) -> ProviderStats:
+        """Build stats from LangChain usage_metadata + measured wall clock."""
+        total_ns = max(0, int(duration_seconds * 1e9))
+        prompt_tokens = 0
+        eval_tokens = fallback_eval_count
+        if usage:
+            prompt_tokens = int(usage.get("input_tokens") or 0)
+            eval_tokens = int(usage.get("output_tokens") or fallback_eval_count)
+        return cls(
+            total_duration=total_ns,
+            load_duration=0,
+            prompt_eval_count=prompt_tokens,
+            prompt_eval_duration=0,
+            eval_count=eval_tokens,
+            eval_duration=total_ns,
+            done_reason=done_reason,
         )
 
     @property
@@ -108,12 +119,7 @@ class ProviderStats:
         return getattr(self, name) / 1e9
 
     def as_dict(self) -> dict:
-        """JSON-safe view: raw nanosecond counts plus the derived rates.
-
-        Raw fields are kept rather than only the seconds so a report can be
-        re-derived exactly, and the derived keys are added here so every caller
-        formats one shape instead of each computing its own.
-        """
+        """JSON-safe view: raw nanosecond counts plus derived rates."""
         data = asdict(self)
         data["total_seconds"] = self.seconds("total_duration")
         data["load_seconds"] = self.seconds("load_duration")
@@ -132,35 +138,273 @@ class LLMUnavailableError(LLMError):
     """The provider could not be reached, or refused the request."""
 
 
-class LLMClient(Protocol):
-    """What the graph needs from a provider."""
+class LLMRateLimitError(LLMUnavailableError):
+    """The provider rejected the request because a rate limit was reached."""
+
+
+class LLMProvider(Protocol):
+    """Provider-agnostic interface required by the graph."""
+
+    @property
+    def model_name(self) -> str:
+        """The identifier of the active model."""
+
+    @property
+    def provider_name(self) -> str:
+        """'groq' | 'gemini' | 'ollama'."""
 
     def stream(
         self,
         messages: Sequence[Message],
         on_stats: Callable[[ProviderStats], None] | None = None,
     ) -> AsyncIterator[str]:
-        """Yield answer text incrementally, exactly as the model produces it.
-
-        ``on_stats`` is called once with the provider's own timing breakdown when
-        the generation finishes, or not at all if the provider reports none. It
-        is a callback rather than a return value because a node cannot return
-        two things from a generator, and a shared mutable "last stats" attribute
-        would be wrong the moment two requests are in flight.
-        """
+        """Yield answer text incrementally, exactly as generated."""
 
     async def complete(self, messages: Sequence[Message]) -> str:
-        """Return the whole answer. Used for non-streaming callers and tests."""
+        """Return the complete answer."""
+
+    async def aclose(self) -> None:
+        """Release underlying connections."""
 
 
-class OllamaClient:
-    """Chat against a local Ollama server.
+#: Backwards compatibility with Stage 5 naming.
+LLMClient = LLMProvider
 
-    Ollama's ``/api/chat`` streams newline-delimited JSON, one object per token
-    batch, with ``done: true`` on the last. Anything that is not a 200, or a
-    stream that carries an ``error`` field, is raised: a provider that fails
-    mid-stream must not look like a short answer.
+
+def to_langchain_messages(messages: Sequence[Message]) -> list[BaseMessage]:
+    """Convert plain dict messages to LangChain typed message instances.
+
+    Preserves role semantics for all providers:
+    - 'system' -> SystemMessage (carries prompt-injection untrusted context rules)
+    - 'user' -> HumanMessage (carries query and context blocks)
+    - 'assistant' -> AIMessage (carries prior attempts during retry)
     """
+    lc_messages: list[BaseMessage] = []
+    for msg in messages:
+        role = msg.get("role", "user").lower()
+        content = msg.get("content", "")
+        if role == "system":
+            lc_messages.append(SystemMessage(content=content))
+        elif role == "user":
+            lc_messages.append(HumanMessage(content=content))
+        elif role == "assistant":
+            lc_messages.append(AIMessage(content=content))
+        else:
+            lc_messages.append(HumanMessage(content=content))
+    return lc_messages
+
+
+def _extract_text(content: Any) -> str:
+    """Safely extract plain text from LangChain message content."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict) and "text" in p:
+                parts.append(str(p["text"]))
+        return "".join(parts)
+    return str(content) if content is not None else ""
+
+
+class GroqProvider:
+    """Chat against Groq cloud LPU inference via langchain-groq."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        temperature: float,
+        timeout_seconds: float,
+        num_predict: int,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._temperature = temperature
+        self._timeout = timeout_seconds
+        self._num_predict = num_predict
+        self._llm = ChatGroq(
+            model=self._model,
+            groq_api_key=self._api_key,
+            temperature=self._temperature,
+            max_tokens=self._num_predict,
+            timeout=self._timeout,
+            max_retries=1,
+        )
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def provider_name(self) -> str:
+        return "groq"
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        on_stats: Callable[[ProviderStats], None] | None = None,
+    ) -> AsyncIterator[str]:
+        lc_messages = to_langchain_messages(messages)
+        started = time.perf_counter()
+        usage: dict | None = None
+        token_count = 0
+        try:
+            async for chunk in self._llm.astream(lc_messages):
+                text = _extract_text(chunk.content)
+                if getattr(chunk, "usage_metadata", None):
+                    usage = chunk.usage_metadata
+                if text:
+                    token_count += 1
+                    yield text
+        except Exception as exc:
+            err_str = str(exc)
+            err_lower = err_str.lower()
+            if "rate_limit" in err_lower or "rate limit" in err_lower or "429" in err_lower:
+                raise LLMRateLimitError(
+                    f"Groq rate limit exceeded for model {self._model!r}: {err_str}. "
+                    "Free-tier limits (e.g. 30 RPM, 12,000 TPM) reached. Wait before retrying."
+                ) from exc
+            raise LLMUnavailableError(
+                f"Groq API error for model {self._model!r}: {err_str}"
+            ) from exc
+        finally:
+            duration = time.perf_counter() - started
+            if on_stats is not None:
+                stats = ProviderStats.from_usage(
+                    usage=usage,
+                    duration_seconds=duration,
+                    done_reason="stop",
+                    fallback_eval_count=token_count,
+                )
+                on_stats(stats)
+
+    async def complete(self, messages: Sequence[Message]) -> str:
+        lc_messages = to_langchain_messages(messages)
+        try:
+            response = await self._llm.ainvoke(lc_messages)
+            return _extract_text(response.content)
+        except Exception as exc:
+            err_str = str(exc)
+            err_lower = err_str.lower()
+            if "rate_limit" in err_lower or "rate limit" in err_lower or "429" in err_lower:
+                raise LLMRateLimitError(
+                    f"Groq rate limit exceeded for model {self._model!r}: {err_str}"
+                ) from exc
+            raise LLMUnavailableError(
+                f"Groq API error for model {self._model!r}: {err_str}"
+            ) from exc
+
+    async def aclose(self) -> None:
+        pass
+
+
+class GeminiProvider:
+    """Chat against Google Gemini API via langchain-google-genai."""
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        temperature: float,
+        timeout_seconds: float,
+        num_predict: int,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model
+        self._temperature = temperature
+        self._timeout = timeout_seconds
+        self._num_predict = num_predict
+        self._llm = ChatGoogleGenerativeAI(
+            model=self._model,
+            google_api_key=self._api_key,
+            temperature=self._temperature,
+            max_output_tokens=self._num_predict,
+            timeout=self._timeout,
+            max_retries=1,
+        )
+
+    @property
+    def model_name(self) -> str:
+        return self._model
+
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    async def stream(
+        self,
+        messages: Sequence[Message],
+        on_stats: Callable[[ProviderStats], None] | None = None,
+    ) -> AsyncIterator[str]:
+        lc_messages = to_langchain_messages(messages)
+        started = time.perf_counter()
+        usage: dict | None = None
+        token_count = 0
+        try:
+            async for chunk in self._llm.astream(lc_messages):
+                text = _extract_text(chunk.content)
+                if getattr(chunk, "usage_metadata", None):
+                    usage = chunk.usage_metadata
+                if text:
+                    token_count += 1
+                    yield text
+        except Exception as exc:
+            err_str = str(exc)
+            err_lower = err_str.lower()
+            if (
+                "resource_exhausted" in err_lower
+                or "resourceexhausted" in err_lower
+                or "rate limit" in err_lower
+                or "429" in err_lower
+            ):
+                raise LLMRateLimitError(
+                    f"Gemini rate limit exceeded for model {self._model!r}: {err_str}. "
+                    "Free-tier limits (e.g. 15 RPM, 1M TPM) reached. Wait before retrying."
+                ) from exc
+            raise LLMUnavailableError(
+                f"Gemini API error for model {self._model!r}: {err_str}"
+            ) from exc
+        finally:
+            duration = time.perf_counter() - started
+            if on_stats is not None:
+                stats = ProviderStats.from_usage(
+                    usage=usage,
+                    duration_seconds=duration,
+                    done_reason="stop",
+                    fallback_eval_count=token_count,
+                )
+                on_stats(stats)
+
+    async def complete(self, messages: Sequence[Message]) -> str:
+        lc_messages = to_langchain_messages(messages)
+        try:
+            response = await self._llm.ainvoke(lc_messages)
+            return _extract_text(response.content)
+        except Exception as exc:
+            err_str = str(exc)
+            err_lower = err_str.lower()
+            if (
+                "resource_exhausted" in err_lower
+                or "resourceexhausted" in err_lower
+                or "rate limit" in err_lower
+                or "429" in err_lower
+            ):
+                raise LLMRateLimitError(
+                    f"Gemini rate limit exceeded for model {self._model!r}: {err_str}"
+                ) from exc
+            raise LLMUnavailableError(
+                f"Gemini API error for model {self._model!r}: {err_str}"
+            ) from exc
+
+    async def aclose(self) -> None:
+        pass
+
+
+class OllamaProvider:
+    """Chat against local Ollama via langchain-ollama."""
 
     def __init__(
         self,
@@ -176,106 +420,83 @@ class OllamaClient:
         self._model = model
         self._temperature = temperature
         self._num_ctx = num_ctx
-        self._timeout = httpx.Timeout(timeout_seconds, connect=10.0)
+        self._timeout = timeout_seconds
         self._keep_alive = keep_alive
         self._num_predict = num_predict
-        self._client: httpx.AsyncClient | None = None
+        self._llm = ChatOllama(
+            base_url=self._base_url,
+            model=self._model,
+            temperature=self._temperature,
+            num_ctx=self._num_ctx,
+            keep_alive=self._keep_alive,
+            num_predict=self._num_predict,
+            client_kwargs={"timeout": self._timeout},
+        )
 
-    def _payload(self, messages: Sequence[Message], stream: bool) -> dict:
-        return {
-            "model": self._model,
-            "messages": list(messages),
-            "stream": stream,
-            # Resisting eviction between requests. Measured: load_duration is
-            # 0.07s while the model is resident and 2.0-3.0s when it is not, so
-            # an eviction costs the reload plus a first prefill that runs at
-            # roughly a third of the steady-state rate while the runner warms.
-            "keep_alive": self._keep_alive,
-            "options": {
-                "temperature": self._temperature,
-                "num_ctx": self._num_ctx,
-                # Bounded so a runaway generation cannot occupy the connection
-                # for the whole context window before the judge sees it.
-                "num_predict": self._num_predict,
-            },
-        }
+    @property
+    def model_name(self) -> str:
+        return self._model
 
-    def _http(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=self._timeout)
-        return self._client
-
-    async def aclose(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    def _url(self) -> str:
-        return f"{self._base_url}/api/chat"
+    @property
+    def provider_name(self) -> str:
+        return "ollama"
 
     async def stream(
         self,
         messages: Sequence[Message],
         on_stats: Callable[[ProviderStats], None] | None = None,
     ) -> AsyncIterator[str]:
-        client = self._http()
-        payload = self._payload(messages, stream=True)
+        lc_messages = to_langchain_messages(messages)
+        started = time.perf_counter()
+        token_count = 0
+        raw_stats: dict | None = None
         try:
-            async with client.stream("POST", self._url(), json=payload) as response:
-                if response.status_code != 200:
-                    body = (await response.aread()).decode("utf-8", "replace")
-                    raise LLMUnavailableError(
-                        f"ollama returned {response.status_code} for model "
-                        f"{self._model!r}: {body[:400]}"
-                    )
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    event = json.loads(line)
-                    if event.get("error"):
-                        raise LLMUnavailableError(
-                            f"ollama stream error: {event['error']}"
-                        )
-                    piece = (event.get("message") or {}).get("content")
-                    if piece:
-                        yield piece
-                    if event.get("done"):
-                        # Read before the break: the timings live on the done
-                        # event, so breaking first would discard them.
-                        if on_stats is not None:
-                            stats = ProviderStats.from_event(event)
-                            if stats is not None:
-                                on_stats(stats)
-                        break
-        except httpx.HTTPError as exc:
+            async for chunk in self._llm.astream(lc_messages):
+                text = _extract_text(chunk.content)
+                meta = getattr(chunk, "response_metadata", {}) or {}
+                if meta and ("total_duration" in meta or "prompt_eval_count" in meta):
+                    raw_stats = meta
+                if text:
+                    token_count += 1
+                    yield text
+        except Exception as exc:
             raise LLMUnavailableError(
-                f"cannot reach ollama at {self._base_url}: {exc}"
+                f"cannot reach ollama at {self._base_url} for model {self._model!r}: {exc}"
             ) from exc
+        finally:
+            duration = time.perf_counter() - started
+            if on_stats is not None:
+                if raw_stats:
+                    stats = ProviderStats.from_event(raw_stats)
+                else:
+                    stats = None
+                if stats is None:
+                    stats = ProviderStats.from_usage(
+                        usage=None,
+                        duration_seconds=duration,
+                        done_reason="stop",
+                        fallback_eval_count=token_count,
+                    )
+                on_stats(stats)
 
     async def complete(self, messages: Sequence[Message]) -> str:
-        client = self._http()
-        payload = self._payload(messages, stream=False)
+        lc_messages = to_langchain_messages(messages)
         try:
-            response = await client.post(self._url(), json=payload)
-        except httpx.HTTPError as exc:
+            response = await self._llm.ainvoke(lc_messages)
+            return _extract_text(response.content)
+        except Exception as exc:
             raise LLMUnavailableError(
-                f"cannot reach ollama at {self._base_url}: {exc}"
+                f"cannot reach ollama at {self._base_url} for model {self._model!r}: {exc}"
             ) from exc
-        if response.status_code != 200:
-            raise LLMUnavailableError(
-                f"ollama returned {response.status_code} for model "
-                f"{self._model!r}: {response.text[:400]}"
-            )
-        body = response.json()
-        if body.get("error"):
-            raise LLMUnavailableError(f"ollama error: {body['error']}")
-        return (body.get("message") or {}).get("content", "")
+
+    async def aclose(self) -> None:
+        pass
 
 
-_client: LLMClient | None = None
+_client: LLMProvider | None = None
 
 
-def get_llm() -> LLMClient:
+def get_llm() -> LLMProvider:
     """Resolve the configured provider, building it on first use."""
     global _client
     if _client is not None:
@@ -283,8 +504,35 @@ def get_llm() -> LLMClient:
 
     settings = get_settings()
     provider = settings.llm_provider.strip().lower()
-    if provider == "ollama":
-        _client = OllamaClient(
+
+    if provider == "groq":
+        if not settings.groq_api_key or not settings.groq_api_key.strip():
+            raise LLMUnavailableError(
+                "GROQ_API_KEY is not configured in backend/.env. "
+                "Add your key to backend/.env, or set LLM_PROVIDER=ollama for local offline inference."
+            )
+        _client = GroqProvider(
+            api_key=settings.groq_api_key.strip(),
+            model=settings.groq_model.strip(),
+            temperature=settings.llm_temperature,
+            timeout_seconds=settings.llm_timeout_seconds,
+            num_predict=settings.llm_num_predict,
+        )
+    elif provider == "gemini":
+        if not settings.google_api_key or not settings.google_api_key.strip():
+            raise LLMUnavailableError(
+                "GOOGLE_API_KEY (or GEMINI_API_KEY) is not configured in backend/.env. "
+                "Add your key to backend/.env, or set LLM_PROVIDER=groq or ollama."
+            )
+        _client = GeminiProvider(
+            api_key=settings.google_api_key.strip(),
+            model=settings.gemini_model.strip(),
+            temperature=settings.llm_temperature,
+            timeout_seconds=settings.llm_timeout_seconds,
+            num_predict=settings.llm_num_predict,
+        )
+    elif provider == "ollama":
+        _client = OllamaProvider(
             base_url=settings.ollama_base_url,
             model=settings.ollama_model,
             temperature=settings.llm_temperature,
@@ -293,24 +541,24 @@ def get_llm() -> LLMClient:
             keep_alive=settings.llm_keep_alive,
             num_predict=settings.llm_num_predict,
         )
-        logger.info(
-            "llm provider: %s (%s, num_ctx=%d, num_predict=%d, keep_alive=%s)",
-            provider,
-            settings.ollama_model,
-            settings.llm_num_ctx,
-            settings.llm_num_predict,
-            settings.llm_keep_alive,
+    else:
+        raise LLMError(
+            f"Unsupported LLM_PROVIDER {provider!r}. Supported options: 'groq', 'gemini', 'ollama'."
         )
-        return _client
-    raise LLMError(
-        f"unknown LLM_PROVIDER {provider!r}; V1 implements 'ollama'. "
-        "Set LLM_PROVIDER=ollama in backend/.env."
+
+    logger.info(
+        "llm provider: %s (model=%s, temp=%.2f, max_predict=%d)",
+        _client.provider_name,
+        _client.model_name,
+        settings.llm_temperature,
+        settings.llm_num_predict,
     )
+    return _client
 
 
 async def close_llm() -> None:
-    """Release provider HTTP connections on shutdown."""
+    """Release provider connections on shutdown."""
     global _client
-    if isinstance(_client, OllamaClient):
+    if _client is not None:
         await _client.aclose()
     _client = None

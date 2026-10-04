@@ -6,7 +6,7 @@ from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/core/config.py -> backend/
@@ -77,13 +77,27 @@ class Settings(BaseSettings):
     # No default on purpose - a missing value should fail loudly at boot.
     embedding_model: str = Field(min_length=1)
 
-    # --- LLM provider (Stage 5) -------------------------------------------------
+    # --- LLM provider (Stage 5 / Stage 10) --------------------------------------
     # The provider is named in config and resolved through a registry in
-    # app/services/llm.py, so no vendor is hardcoded in application logic. V1
-    # ships one provider: Ollama.
-    llm_provider: str = Field(min_length=1)
+    # app/services/llm.py, so no vendor is hardcoded in application logic.
+    # Supported: "groq" (default), "gemini", "ollama".
+    llm_provider: str = Field(default="groq", min_length=1)
+
+    # Groq configuration (cloud, default for latency)
+    groq_api_key: str | None = None
+    groq_model: str = "llama-3.3-70b-versatile"
+
+    # Google Gemini configuration (cloud, secondary)
+    google_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("google_api_key", "gemini_api_key"),
+    )
+    gemini_model: str = "gemini-2.0-flash"
+
+    # Ollama configuration (local fallback)
     ollama_base_url: str = "http://localhost:11434"
-    ollama_model: str = Field(min_length=1)
+    ollama_model: str = "qwen2.5:3b"
+
     llm_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
     llm_num_ctx: int = Field(default=2048, ge=512)
     llm_timeout_seconds: float = Field(default=180.0, gt=0.0)
@@ -157,6 +171,16 @@ class Settings(BaseSettings):
     # (PROJECT.md Section 2 allows no worker queue in V1). Set RELOAD=false to
     # verify ingestion end to end.
     reload: bool = True
+
+    @field_validator("llm_provider")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        provider = value.strip().lower()
+        if provider not in {"ollama", "groq", "gemini"}:
+            raise ValueError(
+                f"Unsupported LLM_PROVIDER {value!r}. Supported values are: 'groq', 'gemini', 'ollama'."
+            )
+        return provider
 
     @field_validator("database_url")
     @classmethod
