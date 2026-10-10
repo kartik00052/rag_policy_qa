@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\.archify\\architecture-rag-system-20261010-101500\\candidate.json",
+    "sha256": "d92a9e616dfabfc7f7ed8fa806124af7d67a33ed2710ed658acedd3e87264128",
+    "bytes": 4398
+  },
+  "artifact": {
+    "path": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\docs\\diagrams\\architecture.html",
+    "sha256": "14d64f8bba7fa18dcd4fddfff8bdbf49b8949c2e3efbd8cb60c80ed2b5bae762",
+    "bytes": 768996
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\docs\\diagrams\\architecture.finalize.json",
+    "summaryReceipt": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\docs\\diagrams\\architecture.finalize-summary.json",
+    "browserCheckReceipt": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\docs\\diagrams\\architecture.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.0.1",
+    "availableVersion": "3.0.1",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-10T17:39:07.163Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 2403,
+  "layoutReviewRecommendation": {
+    "action": "inspect-leading-space",
+    "evidence": {
+      "measured": true,
+      "emptyTopPx": 150,
+      "emptyTopRatio": 0.252,
+      "occupiedTop": 150,
+      "viewBoxTop": 0,
+      "canvasHeight": 596,
+      "typicalNodeHeight": 58,
+      "reviewSuggested": true
+    },
+    "reason": "Measured content, including routes and labels, leaves a large empty area above the diagram. This is a composition suggestion, not a failed gate.",
+    "repair": "Check whether that leading space is intentional. If not, reposition the connected scene nearer the canvas origin while retaining room for its actual boundaries, labels and return routes. Preserve all meaning and user-fixed geometry, then rerun finalize. No screenshot is required."
+  }
+}

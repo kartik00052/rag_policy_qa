@@ -1,0 +1,56 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "Policy RAG Assistant — Answer Pipeline",
+    "subtitle": "Hybrid retrieval → rerank → evidence gate → grounded, cited answer",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "output": "docs/diagrams/rag-pipeline.html",
+    "repository": {
+      "url": "https://github.com/kartik00052/rag_policy_qa.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "13356fe83b51f4bb23f4912f58afa83d4813becf"
+    }
+  },
+  "lanes": [
+    { "id": "client", "label": "Client" },
+    { "id": "api", "label": "FastAPI" },
+    { "id": "retrieve", "label": "Hybrid Retrieval" },
+    { "id": "guard", "label": "Guardrails" },
+    { "id": "generate", "label": "Generation" },
+    { "id": "outcome", "label": "Outcomes", "variant": "exception" }
+  ],
+  "groups": [
+    { "id": "search", "label": "Dense + sparse recall", "lane": "retrieve", "fromCol": 2, "toCol": 2, "variant": "dashed" }
+  ],
+  "mainPath": ["question", "endpoint", "dense", "fusion", "gate", "llm", "answer"],
+  "nodes": [
+    { "id": "question", "lane": "client", "col": 0, "type": "external", "label": "User question", "sublabel": "plain language", "width": 140 },
+    { "id": "answer", "lane": "client", "col": 5, "type": "frontend", "label": "Cited answer", "sublabel": "streamed via SSE", "width": 150, "sources": [{ "path": "frontend/src/lib/sse.ts" }] },
+    { "id": "endpoint", "lane": "api", "col": 1, "type": "backend", "label": "POST /chat/stream", "sublabel": "SSE endpoint", "width": 150, "sources": [{ "path": "backend/app/api/chat.py" }] },
+    { "id": "dense", "lane": "retrieve", "col": 2, "type": "database", "label": "Dense search", "sublabel": "Qdrant semantic", "width": 150, "yOffset": -40, "sources": [{ "path": "backend/app/services/retrieval.py" }] },
+    { "id": "sparse", "lane": "retrieve", "col": 2, "type": "database", "label": "Sparse BM25", "sublabel": "Qdrant lexical", "width": 150, "yOffset": 40, "sources": [{ "path": "backend/app/services/bm25.py" }] },
+    { "id": "fusion", "lane": "retrieve", "col": 3, "type": "backend", "label": "RRF fusion + rerank", "sublabel": "cross-encoder top-k", "width": 176, "sources": [{ "path": "backend/app/services/reranker.py" }] },
+    { "id": "gate", "lane": "guard", "col": 4, "type": "security", "label": "Evidence gate", "sublabel": "top score ≥ threshold", "width": 160, "sources": [{ "path": "backend/app/services/evidence.py" }] },
+    { "id": "llm", "lane": "generate", "col": 5, "type": "backend", "label": "LLM generates", "sublabel": "grounded + cited", "width": 150, "sources": [{ "path": "backend/app/services/llm.py" }] },
+    { "id": "refusal", "lane": "outcome", "col": 3, "type": "security", "label": "Honest refusal", "sublabel": "not found — no guess", "width": 150 }
+  ],
+  "edges": [
+    { "id": "e-ask", "from": "question", "to": "endpoint", "label": "asks", "variant": "emphasis" },
+    { "id": "e-dense", "from": "endpoint", "to": "dense", "label": "semantic", "variant": "default" },
+    { "id": "e-sparse", "from": "endpoint", "to": "sparse", "label": "lexical", "variant": "default", "role": "branch" },
+    { "id": "e-fuse-d", "from": "dense", "to": "fusion", "variant": "default" },
+    { "id": "e-fuse-s", "from": "sparse", "to": "fusion", "variant": "default" },
+    { "id": "e-gate", "from": "fusion", "to": "gate", "label": "reranked score", "variant": "emphasis" },
+    { "id": "e-gen", "from": "gate", "to": "llm", "label": "sufficient", "variant": "emphasis" },
+    { "id": "e-refuse", "from": "gate", "to": "refusal", "label": "insufficient", "variant": "security", "role": "error" },
+    { "id": "e-stream", "from": "llm", "to": "answer", "label": "stream tokens + citations", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Retrieval", "items": ["Dense (bge-small) and sparse BM25 run in parallel", "RRF fuses both lists, cross-encoder reranks to top-k"] },
+    { "dot": "rose", "title": "Guardrails", "items": ["Evidence gate refuses when support is too low", "Every citation must match a real matched_text span"] },
+    { "dot": "amber", "title": "Streaming contract", "items": ["Validate-then-replay: raw tokens are never trusted", "A refusal emits done only — no token events"] }
+  ]
+}

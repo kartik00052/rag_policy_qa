@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "041a7d9c-0222-4982-b6f7-44e794f78eb0",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\.archify\\workflow-answer-pipeline-20261010-101500\\candidate.json",
+  "output": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\docs\\diagrams\\rag-pipeline.html",
+  "specification": {
+    "sha256": "1536b16868da5ee0d57ada3126e66ea622a2b69ba6fca877909ce57a0cd08250",
+    "bytes": 4309
+  },
+  "artifact": {
+    "sha256": "c5a46566486a8ba21d3a47f1ac00573b6b8b84b68cc5935ca4f0a9d95b1575a2",
+    "bytes": 762485
+  }
+}

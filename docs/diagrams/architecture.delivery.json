@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "eea19a11-0149-4036-b4e2-669b6123b737",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\.archify\\architecture-rag-system-20261010-101500\\candidate.json",
+  "output": "C:\\Users\\karti\\Downloads\\Cipher-coding\\policy_rag\\docs\\diagrams\\architecture.html",
+  "specification": {
+    "sha256": "d92a9e616dfabfc7f7ed8fa806124af7d67a33ed2710ed658acedd3e87264128",
+    "bytes": 4398
+  },
+  "artifact": {
+    "sha256": "14d64f8bba7fa18dcd4fddfff8bdbf49b8949c2e3efbd8cb60c80ed2b5bae762",
+    "bytes": 768996
+  }
+}

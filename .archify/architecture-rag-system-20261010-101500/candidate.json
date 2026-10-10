@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Policy RAG Assistant — System Architecture",
+    "subtitle": "Grounded policy Q&A: hybrid retrieval, rerank, evidence gating, cited answers",
+    "output": "docs/diagrams/architecture.html",
+    "animation": "trace",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/kartik00052/rag_policy_qa.git",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "13356fe83b51f4bb23f4912f58afa83d4813becf"
+    }
+  },
+  "components": [
+    { "id": "users", "type": "external", "label": "Users", "sublabel": "Browser", "pos": [40, 300], "size": [130, 64] },
+    { "id": "spa", "type": "frontend", "label": "React SPA", "sublabel": "Vite + Tailwind", "pos": [260, 300], "size": [150, 64], "sources": [{ "path": "frontend/src/lib/api.ts" }] },
+    { "id": "api", "type": "backend", "label": "FastAPI API", "sublabel": "async REST + SSE", "pos": [500, 300], "size": [150, 64], "sources": [{ "path": "backend/app/main.py" }] },
+    { "id": "engine", "type": "backend", "label": "LangGraph RAG", "sublabel": "retrieve → rerank → cite", "pos": [740, 300], "size": [170, 64], "sources": [{ "path": "backend/app/rag/graph.py" }] },
+    { "id": "provider", "type": "backend", "label": "LLMProvider", "sublabel": "LangChain interface", "tag": "LLM_PROVIDER", "pos": [1000, 300], "size": [150, 64], "sources": [{ "path": "backend/app/services/llm.py" }, { "path": "backend/app/core/config.py" }] },
+    { "id": "groq", "type": "cloud", "label": "Groq", "sublabel": "cloud · default", "pos": [1240, 215], "size": [140, 58] },
+    { "id": "gemini", "type": "cloud", "label": "Gemini", "sublabel": "cloud · secondary", "pos": [1240, 300], "size": [140, 58] },
+    { "id": "ollama", "type": "backend", "label": "Ollama", "sublabel": "local · fallback", "pos": [1240, 385], "size": [140, 58] },
+    { "id": "redis", "type": "database", "label": "Redis", "sublabel": "provisioned", "pos": [500, 150], "size": [150, 58], "sources": [{ "path": "backend/app/services/connectivity.py" }] },
+    { "id": "postgres", "type": "database", "label": "PostgreSQL", "sublabel": "metadata + chat log", "pos": [500, 470], "size": [150, 58], "sources": [{ "path": "backend/app/db/models.py" }] },
+    { "id": "qdrant", "type": "database", "label": "Qdrant", "sublabel": "chunks + vectors", "pos": [740, 470], "size": [170, 58], "sources": [{ "path": "backend/app/services/qdrant.py" }] },
+    { "id": "disk", "type": "cloud", "label": "Local disk", "sublabel": "raw uploads", "pos": [260, 470], "size": [150, 58], "sources": [{ "path": "backend/app/services/documents.py" }] }
+  ],
+  "connections": [
+    { "id": "users-spa", "from": "users", "to": "spa", "label": "opens", "variant": "emphasis" },
+    { "id": "spa-api", "from": "spa", "to": "api", "label": "HTTP / SSE", "variant": "emphasis" },
+    { "id": "api-engine", "from": "api", "to": "engine", "label": "invoke RAG", "variant": "emphasis" },
+    { "id": "engine-provider", "from": "engine", "to": "provider", "label": "generate()", "variant": "emphasis" },
+    { "id": "provider-groq", "from": "provider", "to": "groq", "variant": "emphasis" },
+    { "id": "provider-gemini", "from": "provider", "to": "gemini" },
+    { "id": "provider-ollama", "from": "provider", "to": "ollama", "label": "fallback", "variant": "dashed" },
+    { "id": "api-redis", "from": "api", "to": "redis", "label": "health check", "variant": "dashed", "fromSide": "top", "toSide": "bottom" },
+    { "id": "api-postgres", "from": "api", "to": "postgres", "label": "SQL", "fromSide": "bottom", "toSide": "top" },
+    { "id": "engine-qdrant", "from": "engine", "to": "qdrant", "label": "upsert / search", "fromSide": "bottom", "toSide": "top" },
+    { "id": "api-disk", "from": "api", "to": "disk", "label": "store upload", "variant": "dashed", "fromSide": "bottom", "toSide": "top" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Retrieval", "items": ["Dense (bge-small) + sparse BM25 over Qdrant", "RRF fusion, then cross-encoder rerank"] },
+    { "dot": "rose", "title": "Guardrails", "items": ["Evidence gate blocks answers without support", "Citations must match a real matched_text span"] },
+    { "dot": "amber", "title": "Disclosure", "items": ["Groq/Gemini receive retrieved context in each request", "Ollama stays a fully local fallback"] }
+  ]
+}
